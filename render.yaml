@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: freemic-server
+    runtime: node
+    region: singapore          # 한국과 가장 가까운 Render 리전
+    plan: free                 # 무료 플랜 (MVP 단계)
+
+    buildCommand: pnpm install && pnpm build
+    startCommand: pnpm start
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      - key: DATABASE_URL
+        sync: false            # Render 대시보드에서 직접 입력
+
+      - key: JWT_SECRET
+        generateValue: true    # Render가 자동 생성 (32자 이상 랜덤)
+
+      - key: JWT_EXPIRES_IN
+        value: 15m
+
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 30d
+
+      - key: CLIENT_URL
+        sync: false            # Vercel 배포 후 프론트엔드 URL 입력
+
+      - key: CLIENT_URL_PROD
+        sync: false
+
+      - key: TOSS_SECRET_KEY
+        sync: false            # 토스페이먼츠 대시보드에서 발급
+
+      - key: TOSS_CLIENT_KEY
+        sync: false
+
+    # Render free plan: 15분 비활성 시 자동 sleep
+    # 필요 시 paid plan으로 업그레이드하거나 healthcheck cron 추가
+    healthCheckPath: /health
