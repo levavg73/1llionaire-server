@@ -1,0 +1,324 @@
+import { Router, Response, NextFunction } from "express";
+import { z } from "zod";
+import prisma from "../config/database";
+import { authenticate } from "../middleware/auth";
+import { requireCustomer } from "../middleware/roles";
+import { AuthRequest } from "../types";
+import {
+  successResponse,
+  errorResponse,
+  listResponse,
+  parsePagination,
+} from "../utils/response";
+import {
+  eventDateString,
+  optionalHttpsUrl,
+  optionalShortText,
+  requestStatusQuerySchema,
+  stringArray,
+  timeHHmm,
+} from "../utils/validation";
+
+const router = Router();
+
+// ── Zod 스키마 ──────────────────────────────────────────────
+
+const requestBaseSchema = z.object({
+  event_title: z.string().trim().min(1, "행사명을 입력해 주세요.").max(200),
+  event_type: z.string().trim().min(1, "행사 종류를 선택해 주세요.").max(100),
+  event_date: eventDateString,
+  start_time: timeHHmm,
+  end_time: timeHHmm,
+  region: z.string().trim().min(1, "지역을 입력해 주세요.").max(100),
+  venue: optionalShortText(200),
+  budget_min: z.number().int().positive().optional(),
+  budget_max: z.number().int().positive().optional(),
+  preferred_freelancer_type: stringArray(20, 50),
+  preferred_styles: stringArray(20, 50),
+  required_language: optionalShortText(50),
+  script_required: z.boolean().default(false),
+  rehearsal_required: z.boolean().default(false),
+  travel_required: z.boolean().default(false),
+  attachment_url: optionalHttpsUrl,
+  description: optionalShortText(3000),
+});
+
+const validateRequestRanges = (
+  body: { budget_min?: number; budget_max?: number; start_time?: string; end_time?: string },
+  ctx: z.RefinementCtx
+) => {
+  if (body.budget_min && body.budget_max && body.budget_min > body.budget_max) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["budget_max"],
+      message: "최대 예산은 최소 예산보다 크거나 같아야 합니다.",
+    });
+  }
+
+  if (body.start_time && body.end_time && body.start_time >= body.end_time) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["end_time"],
+      message: "종료 시간은 시작 시간보다 뒤여야 합니다.",
+    });
+  }
+};
+
+const createRequestSchema = requestBaseSchema.superRefine(validateRequestRanges);
+const updateRequestSchema = requestBaseSchema.partial().superRefine(validateRequestRanges);
+
+// ── POST /api/customer/requests ─────────────────────────────
+
+router.post(
+  "/",
+  authenticate,
+  requireCustomer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const body = createRequestSchema.parse(req.body);
+
+      const request = await prisma.eventRequest.create({
+        data: {
+          ...body,
+          event_date: new Date(body.event_date),
+          attachment_url: body.attachment_url || null,
+          customer_id: req.user!.userId,
+          status: "submitted",
+        },
+      });
+
+      return successResponse(res, request, "요청서가 등록되었습니다.", 201);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── GET /api/customer/requests ──────────────────────────────
+
+router.get(
+  "/",
+  authenticate,
+  requireCustomer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>);
+      const { status } = requestStatusQuerySchema.parse(req.query);
+
+      const where = {
+        customer_id: req.user!.userId,
+        ...(status && { status }),
+      };
+
+      const [items, total] = await Promise.all([
+        prisma.eventRequest.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: { created_at: "desc" },
+          select: {
+            id: true,
+            event_title: true,
+            event_type: true,
+            event_date: true,
+            region: true,
+            status: true,
+            created_at: true,
+            updated_at: true,
+          },
+        }),
+        prisma.eventRequest.count({ where }),
+      ]);
+
+      return listResponse(res, items, total, page, limit);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── GET /api/customer/requests/:id ──────────────────────────
+
+router.get(
+  "/:id",
+  authenticate,
+  requireCustomer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const request = await prisma.eventRequest.findFirst({
+        where: {
+          id: req.params.id,
+          customer_id: req.user!.userId,
+        },
+        include: {
+          recommendations: {
+            include: {
+              freelancer: {
+                select: {
+                  id: true,
+                  display_name: true,
+                  profile_image_url: true,
+                  headline: true,
+                  categories: true,
+                  region: true,
+                  career_years: true,
+                  base_price_min: true,
+                  base_price_max: true,
+                  avg_rating: true,
+                  review_count: true,
+                  portfolios: {
+                    where: { is_representative: true, is_public: true },
+                    take: 1,
+                  },
+                },
+              },
+            },
+            orderBy: { display_order: "asc" },
+          },
+        },
+      });
+
+      if (!request) {
+        return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
+      }
+
+      return successResponse(res, request);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── PATCH /api/customer/requests/:id ────────────────────────
+
+router.patch(
+  "/:id",
+  authenticate,
+  requireCustomer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const body = updateRequestSchema.parse(req.body);
+
+      const existing = await prisma.eventRequest.findFirst({
+        where: { id: req.params.id, customer_id: req.user!.userId },
+      });
+
+      if (!existing) {
+        return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
+      }
+
+      // submitted 또는 reviewing 상태만 수정 가능
+      if (!["submitted", "reviewing"].includes(existing.status)) {
+        return errorResponse(res, "FORBIDDEN", "현재 상태에서는 수정할 수 없습니다.", [], 403);
+      }
+
+      const updated = await prisma.eventRequest.update({
+        where: { id: req.params.id },
+        data: {
+          ...body,
+          ...(body.event_date && { event_date: new Date(body.event_date) }),
+          ...("attachment_url" in body && { attachment_url: body.attachment_url ?? null }),
+        },
+      });
+
+      return successResponse(res, updated, "요청서가 수정되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── DELETE /api/customer/requests/:id (상태 변경으로 soft delete) ──
+
+router.delete(
+  "/:id",
+  authenticate,
+  requireCustomer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const existing = await prisma.eventRequest.findFirst({
+        where: { id: req.params.id, customer_id: req.user!.userId },
+      });
+
+      if (!existing) {
+        return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
+      }
+
+      if (["booked", "completed"].includes(existing.status)) {
+        return errorResponse(res, "FORBIDDEN", "예약 완료 상태의 요청서는 취소할 수 없습니다.", [], 403);
+      }
+
+      await prisma.eventRequest.update({
+        where: { id: req.params.id },
+        data: { status: "canceled" },
+      });
+
+      return successResponse(res, null, "요청서가 취소되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── GET /api/customer/requests/:id/recommendations ──────────
+
+router.get(
+  "/:id/recommendations",
+  authenticate,
+  requireCustomer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const request = await prisma.eventRequest.findFirst({
+        where: { id: req.params.id, customer_id: req.user!.userId },
+      });
+
+      if (!request) {
+        return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
+      }
+
+      const recommendations = await prisma.recommendation.findMany({
+        where: { request_id: req.params.id },
+        orderBy: { display_order: "asc" },
+        include: {
+          freelancer: {
+            select: {
+              id: true,
+              display_name: true,
+              profile_image_url: true,
+              headline: true,
+              categories: true,
+              styles: true,
+              region: true,
+              career_years: true,
+              base_price_min: true,
+              base_price_max: true,
+              languages: true,
+              avg_rating: true,
+              review_count: true,
+              portfolios: {
+                where: { is_public: true },
+                orderBy: [{ is_representative: "desc" }, { created_at: "desc" }],
+                take: 3,
+              },
+            },
+          },
+        },
+      });
+
+      // 후보 조회 시 상태를 viewed로 업데이트
+      await prisma.recommendation.updateMany({
+        where: {
+          request_id: req.params.id,
+          status: "sent",
+        },
+        data: { status: "viewed" },
+      });
+
+      return successResponse(res, recommendations);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+export default router;
