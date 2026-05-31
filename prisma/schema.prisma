@@ -1,0 +1,384 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── 공통 Enum ────────────────────────────────────────────────
+
+enum UserType {
+  customer
+  freelancer
+  admin
+}
+
+enum FreelancerStatus {
+  draft
+  pending_review
+  approved
+  rejected
+  hidden
+  suspended
+}
+
+enum RequestStatus {
+  submitted
+  reviewing
+  recommending
+  recommended
+  consulting
+  booked
+  completed
+  reviewed
+  canceled
+  disputed
+}
+
+enum RecommendationStatus {
+  draft
+  sent
+  viewed
+  consultation_requested
+  selected
+  rejected
+}
+
+enum QuoteStatus {
+  proposed
+  accepted
+  rejected
+  expired
+  canceled
+}
+
+enum BookingStatus {
+  pending
+  confirmed
+  completed
+  canceled
+  disputed
+}
+
+enum PaymentStatus {
+  unpaid
+  deposit_paid
+  fully_paid
+  refunded
+  failed
+}
+
+enum SettlementStatus {
+  pending
+  scheduled
+  completed
+  held
+  failed
+}
+
+enum ReviewStatus {
+  pending
+  published
+  hidden
+  reported
+}
+
+// ─── 모델 ────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(cuid())
+  user_type     UserType
+  name          String
+  email         String   @unique
+  password_hash String
+  phone         String?
+  provider      String?
+  provider_id   String?
+  is_active     Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  customer_profile   CustomerProfile?
+  freelancer_profile FreelancerProfile?
+  event_requests     EventRequest[]
+  recommendations    Recommendation[]   @relation("RecommendedBy")
+  quotes             Quote[]            @relation("QuotedBy")
+  bookings_as_customer  Booking[]       @relation("CustomerBookings")
+  reviews_written    Review[]           @relation("CustomerReviews")
+  refresh_tokens      RefreshToken[]
+
+  @@index([email])
+  @@index([user_type])
+  @@map("users")
+}
+
+model CustomerProfile {
+  id             String  @id @default(cuid())
+  user_id        String  @unique
+  customer_type  String?
+  company_name   String?
+  department     String?
+  manager_name   String?
+  memo           String?
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("customer_profiles")
+}
+
+model FreelancerProfile {
+  id                       String           @id @default(cuid())
+  user_id                  String           @unique
+  display_name             String?
+  profile_image_url        String?
+  headline                 String?
+  bio                      String?
+  region                   String?
+  available_regions        String[] @default([])
+  categories               String[] @default([])
+  styles                   String[] @default([])
+  career_years             Int?
+  base_price_min           Int?
+  base_price_max           Int?
+  languages                String[] @default([])
+  script_writing_available Boolean          @default(false)
+  rehearsal_available      Boolean          @default(false)
+  travel_available         Boolean          @default(false)
+  status                   FreelancerStatus @default(draft)
+  voice_score              Float?
+  approved_at              DateTime?
+  rejected_reason          String?
+  avg_rating               Float?
+  review_count             Int              @default(0)
+  created_at               DateTime         @default(now())
+  updated_at               DateTime         @updatedAt
+
+  user          User            @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  portfolios    Portfolio[]
+  recommendations Recommendation[]
+  quotes        Quote[]
+  bookings      Booking[]       @relation("FreelancerBookings")
+  reviews       Review[]        @relation("FreelancerReviews")
+
+  @@index([status])
+  @@map("freelancer_profiles")
+}
+
+model Portfolio {
+  id                String   @id @default(cuid())
+  freelancer_id     String
+  portfolio_type    String
+  title             String
+  description       String?
+  media_url         String
+  thumbnail_url     String?
+  category          String?
+  is_representative Boolean  @default(false)
+  is_public         Boolean  @default(true)
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  freelancer FreelancerProfile @relation(fields: [freelancer_id], references: [id], onDelete: Cascade)
+
+  @@index([freelancer_id])
+  @@map("portfolios")
+}
+
+model EventRequest {
+  id                        String        @id @default(cuid())
+  customer_id               String
+  event_title               String
+  event_type                String
+  event_date                DateTime
+  start_time                String
+  end_time                  String
+  region                    String
+  venue                     String?
+  budget_min                Int?
+  budget_max                Int?
+  preferred_freelancer_type String[] @default([])
+  preferred_styles          String[] @default([])
+  required_language         String?
+  script_required           Boolean       @default(false)
+  rehearsal_required        Boolean       @default(false)
+  travel_required           Boolean       @default(false)
+  attachment_url            String?
+  description               String?
+  status                    RequestStatus @default(submitted)
+  created_at                DateTime      @default(now())
+  updated_at                DateTime      @updatedAt
+
+  customer        User             @relation(fields: [customer_id], references: [id])
+  recommendations Recommendation[]
+  quotes          Quote[]
+  bookings        Booking[]
+
+  @@index([customer_id])
+  @@index([status])
+  @@map("event_requests")
+}
+
+model Recommendation {
+  id                    String               @id @default(cuid())
+  request_id            String
+  freelancer_id         String
+  recommended_by        String
+  recommendation_reason String?
+  display_order         Int                  @default(0)
+  status                RecommendationStatus @default(draft)
+  created_at            DateTime             @default(now())
+  updated_at            DateTime             @updatedAt
+
+  request    EventRequest      @relation(fields: [request_id], references: [id])
+  freelancer FreelancerProfile @relation(fields: [freelancer_id], references: [id])
+  admin      User              @relation("RecommendedBy", fields: [recommended_by], references: [id])
+
+  @@index([request_id])
+  @@unique([request_id, freelancer_id])
+  @@map("recommendations")
+}
+
+model Quote {
+  id                   String      @id @default(cuid())
+  request_id           String
+  freelancer_id        String
+  quoted_by            String
+  price                Int
+  platform_fee         Int         @default(0)
+  total_price          Int
+  included_services    String?
+  script_included      Boolean     @default(false)
+  rehearsal_included   Boolean     @default(false)
+  travel_fee_included  Boolean     @default(false)
+  message              String?
+  valid_until          DateTime?
+  status               QuoteStatus @default(proposed)
+  created_at           DateTime    @default(now())
+  updated_at           DateTime    @updatedAt
+
+  request    EventRequest      @relation(fields: [request_id], references: [id])
+  freelancer FreelancerProfile @relation(fields: [freelancer_id], references: [id])
+  quoted_by_user User          @relation("QuotedBy", fields: [quoted_by], references: [id])
+  bookings   Booking[]
+
+  @@index([request_id])
+  @@index([freelancer_id])
+  @@map("quotes")
+}
+
+model Booking {
+  id                 String          @id @default(cuid())
+  request_id         String?
+  customer_id        String
+  freelancer_id      String
+  quote_id           String?
+  event_title        String
+  event_date         DateTime
+  start_time         String
+  end_time           String
+  venue              String?
+  final_price        Int
+  platform_fee       Int             @default(0)
+  freelancer_amount  Int
+  booking_status     BookingStatus   @default(pending)
+  payment_status     PaymentStatus   @default(unpaid)
+  settlement_status  SettlementStatus @default(pending)
+  cancel_reason      String?
+  created_at         DateTime        @default(now())
+  updated_at         DateTime        @updatedAt
+
+  request    EventRequest?     @relation(fields: [request_id], references: [id])
+  customer   User              @relation("CustomerBookings", fields: [customer_id], references: [id])
+  freelancer FreelancerProfile @relation("FreelancerBookings", fields: [freelancer_id], references: [id])
+  quote      Quote?            @relation(fields: [quote_id], references: [id])
+  reviews    Review[]
+  payment    Payment?
+
+  @@index([customer_id])
+  @@index([freelancer_id])
+  @@index([booking_status])
+  @@index([payment_status])
+  @@map("bookings")
+}
+
+model Review {
+  id                    String       @id @default(cuid())
+  booking_id            String       @unique
+  customer_id           String
+  freelancer_id         String
+  punctuality_score     Int
+  voice_delivery_score  Int
+  event_understanding_score Int
+  atmosphere_score      Int
+  script_score          Int
+  response_score        Int
+  communication_score   Int
+  total_score           Float
+  rehire_intent         Boolean
+  comment               String?
+  status                ReviewStatus @default(pending)
+  created_at            DateTime     @default(now())
+  updated_at            DateTime     @updatedAt
+
+  booking    Booking           @relation(fields: [booking_id], references: [id])
+  customer   User              @relation("CustomerReviews", fields: [customer_id], references: [id])
+  freelancer FreelancerProfile @relation("FreelancerReviews", fields: [freelancer_id], references: [id])
+
+  @@index([freelancer_id])
+  @@index([status])
+  @@map("reviews")
+}
+model RefreshToken {
+  id         String    @id @default(cuid())
+  user_id    String
+  token_hash String
+  expires_at DateTime
+  revoked_at DateTime?
+  created_at DateTime  @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([token_hash])
+  @@map("refresh_tokens")
+}
+
+
+model Payment {
+  id              String        @id @default(cuid())
+  booking_id      String        @unique
+  order_id        String        @unique
+  payment_key     String?       @unique
+  amount          Int
+  method          String?
+  status          PaymentStatusToss @default(READY)
+  requested_at    DateTime?
+  approved_at     DateTime?
+  failure_code    String?
+  failure_message String?
+  raw_response    Json?
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @updatedAt
+
+  booking Booking @relation(fields: [booking_id], references: [id])
+
+  @@index([booking_id])
+  @@index([order_id])
+  @@map("payments")
+}
+
+enum PaymentStatusToss {
+  READY
+  IN_PROGRESS
+  WAITING_FOR_DEPOSIT
+  DONE
+  CANCELED
+  PARTIAL_CANCELED
+  ABORTED
+  EXPIRED
+}
