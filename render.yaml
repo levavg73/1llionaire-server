@@ -6,6 +6,7 @@ services:
     plan: free                 # 무료 플랜 (MVP 단계)
 
     buildCommand: pnpm install && pnpm build
+    preDeployCommand: pnpm db:migrate:prod
     startCommand: pnpm start
 
     envVars:
@@ -25,10 +26,10 @@ services:
         value: 30d
 
       - key: CLIENT_URL
-        sync: false            # Vercel 배포 후 프론트엔드 URL 입력
+        sync: false            # 로컬 개발용 프론트엔드 origin
 
       - key: CLIENT_URL_PROD
-        sync: false
+        sync: false            # 프로덕션 프론트엔드 origin
 
       - key: TOSS_SECRET_KEY
         sync: false            # 토스페이먼츠 대시보드에서 발급
