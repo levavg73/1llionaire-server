@@ -1,7 +1,6 @@
 import { Router, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import multer from "multer";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
@@ -19,34 +18,17 @@ import {
   optionalStringArray,
   requiredHttpsUrl,
 } from "../utils/validation";
+import {
+  PROFILE_IMAGE_BUCKET,
+  PROFILE_IMAGE_MAX_SIZE,
+  attachSignedProfileImageUrl,
+  createProfileImageSignedUrl,
+  getSupabaseAdminClient,
+} from "../utils/profileImages";
 
 const router = Router();
 
-const PROFILE_IMAGE_MAX_SIZE = 5 * 1024 * 1024;
-const PROFILE_IMAGE_BUCKET = process.env.SUPABASE_PROFILE_IMAGE_BUCKET ?? "profile-images";
 const allowedProfileImageMimeTypes = new Set(["image/jpeg", "image/png"]);
-
-let supabaseAdminClient: SupabaseClient | null = null;
-
-function getSupabaseAdminClient() {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error("Supabase Storage 환경변수가 설정되지 않았습니다.");
-  }
-
-  if (!supabaseAdminClient) {
-    supabaseAdminClient = createClient(supabaseUrl, supabaseKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    });
-  }
-
-  return supabaseAdminClient;
-}
 
 function getProfileImageExtension(file: Express.Multer.File) {
   if (file.mimetype === "image/png") return ".png";
@@ -70,6 +52,33 @@ function hasValidProfileImageSignature(file: Express.Multer.File) {
 
 function buildProfileImageStoragePath(userId: string, file: Express.Multer.File) {
   return `freelancers/${userId}/${Date.now()}-${crypto.randomUUID()}${getProfileImageExtension(file)}`;
+}
+
+function isOwnProfileImagePath(userId: string, path?: string | null) {
+  return Boolean(path && path.startsWith(`freelancers/${userId}/`));
+}
+
+async function deleteStoredProfileImage(path?: string | null) {
+  if (!path) return;
+
+  const { error } = await getSupabaseAdminClient()
+    .storage
+    .from(PROFILE_IMAGE_BUCKET)
+    .remove([path]);
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function tryDeleteStoredProfileImage(path?: string | null) {
+  if (!path) return;
+
+  try {
+    await deleteStoredProfileImage(path);
+  } catch (err) {
+    console.error("[supabase-profile-image-delete-error]", err);
+  }
 }
 
 const profileImageUpload = multer({
@@ -109,10 +118,12 @@ function handleProfileImageUpload(req: AuthRequest, res: Response, next: NextFun
 const profileSchema = z
   .object({
     display_name: z.string().trim().min(1, "활동명을 입력해 주세요.").max(50),
-    profile_image_url: z
+    profile_image_path: z
       .string({ required_error: "프로필 이미지를 업로드해 주세요." })
-      .url("유효한 이미지 URL이 아닙니다.")
-      .max(2048, "이미지 URL은 2048자 이하로 입력해 주세요."),
+      .trim()
+      .min(1, "프로필 이미지를 업로드해 주세요.")
+      .max(2048, "이미지 경로는 2048자 이하로 입력해 주세요."),
+    profile_image_url: z.string().url().max(4096).optional(),
     headline: z.string().trim().min(1, "한 줄 소개를 입력해 주세요.").max(150),
     bio: z.string().trim().min(1, "자기소개를 입력해 주세요.").max(2000),
     region: z.string().trim().min(1, "활동 지역을 입력해 주세요.").max(100),
@@ -211,16 +222,60 @@ router.post(
         return errorResponse(res, "SERVER_ERROR", "프로필 이미지 업로드에 실패했습니다.", [], 500);
       }
 
-      const { data: publicUrlData } = supabase.storage
-        .from(PROFILE_IMAGE_BUCKET)
-        .getPublicUrl(data.path);
+      const signedUrl = await createProfileImageSignedUrl(data.path);
 
       return successResponse(
         res,
-        { url: publicUrlData.publicUrl, path: data.path },
+        { url: signedUrl, path: data.path },
         "프로필 이미지가 업로드되었습니다.",
         201
       );
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// DELETE /api/freelancer/profile-image - 현재 프로필 이미지 삭제
+router.delete(
+  "/profile-image",
+  authenticate,
+  requireFreelancer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const profile = await prisma.freelancerProfile.findUnique({
+        where: { user_id: req.user!.userId },
+        select: { id: true, profile_image_path: true },
+      });
+
+      if (!profile) {
+        return errorResponse(res, "NOT_FOUND", "프리랜서 프로필을 찾을 수 없습니다.", [], 404);
+      }
+
+      if (!profile.profile_image_path) {
+        return successResponse(res, null, "삭제할 프로필 이미지가 없습니다.");
+      }
+
+      if (!isOwnProfileImagePath(req.user!.userId, profile.profile_image_path)) {
+        return errorResponse(res, "FORBIDDEN", "삭제할 수 없는 프로필 이미지입니다.", [], 403);
+      }
+
+      try {
+        await deleteStoredProfileImage(profile.profile_image_path);
+      } catch (err) {
+        console.error("[supabase-profile-image-delete-error]", err);
+        return errorResponse(res, "SERVER_ERROR", "프로필 이미지 삭제에 실패했습니다.", [], 500);
+      }
+
+      await prisma.freelancerProfile.update({
+        where: { id: profile.id },
+        data: {
+          profile_image_path: null,
+          profile_image_url: null,
+        },
+      });
+
+      return successResponse(res, null, "프로필 이미지가 삭제되었습니다.");
     } catch (err) {
       next(err);
     }
@@ -244,16 +299,29 @@ router.post(
         return errorResponse(res, "NOT_FOUND", "프리랜서 프로필을 찾을 수 없습니다.", [], 404);
       }
 
+      const previousProfileImagePath = existing.profile_image_path;
+
       const profile = await prisma.freelancerProfile.update({
         where: { user_id: req.user!.userId },
         data: {
           ...body,
-          profile_image_url: body.profile_image_url ?? null,
+          profile_image_url: null,
+          profile_image_path: body.profile_image_path,
           status: "pending_review",
         },
       });
 
-      return successResponse(res, profile, "등록 신청이 완료되었습니다. 관리자 검수 후 승인됩니다.", 201);
+      if (
+        previousProfileImagePath &&
+        previousProfileImagePath !== body.profile_image_path &&
+        isOwnProfileImagePath(req.user!.userId, previousProfileImagePath)
+      ) {
+        void tryDeleteStoredProfileImage(previousProfileImagePath);
+      }
+
+      const responseProfile = await attachSignedProfileImageUrl(profile);
+
+      return successResponse(res, responseProfile, "등록 신청이 완료되었습니다. 관리자 검수 후 승인됩니다.", 201);
     } catch (err) {
       next(err);
     }
@@ -280,7 +348,9 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "프로필을 찾을 수 없습니다.", [], 404);
       }
 
-      return successResponse(res, profile);
+      const responseProfile = await attachSignedProfileImageUrl(profile);
+
+      return successResponse(res, responseProfile);
     } catch (err) {
       next(err);
     }
@@ -296,15 +366,37 @@ router.patch(
     try {
       const body = profileSchema.parse(req.body);
 
+      const existing = await prisma.freelancerProfile.findUnique({
+        where: { user_id: req.user!.userId },
+        select: { profile_image_path: true },
+      });
+
+      if (!existing) {
+        return errorResponse(res, "NOT_FOUND", "프리랜서 프로필을 찾을 수 없습니다.", [], 404);
+      }
+
+      const previousProfileImagePath = existing.profile_image_path;
+
       const profile = await prisma.freelancerProfile.update({
         where: { user_id: req.user!.userId },
         data: {
           ...body,
-          profile_image_url: body.profile_image_url ?? undefined,
+          profile_image_url: null,
+          profile_image_path: body.profile_image_path,
         },
       });
 
-      return successResponse(res, profile, "프로필이 수정되었습니다.");
+      if (
+        previousProfileImagePath &&
+        previousProfileImagePath !== body.profile_image_path &&
+        isOwnProfileImagePath(req.user!.userId, previousProfileImagePath)
+      ) {
+        void tryDeleteStoredProfileImage(previousProfileImagePath);
+      }
+
+      const responseProfile = await attachSignedProfileImageUrl(profile);
+
+      return successResponse(res, responseProfile, "프로필이 수정되었습니다.");
     } catch (err) {
       next(err);
     }

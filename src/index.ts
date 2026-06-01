@@ -14,6 +14,8 @@ import bookingRoutes from "./routes/bookings";
 import reviewRoutes from "./routes/reviews";
 import adminRoutes from "./routes/admin";
 import paymentRoutes from "./routes/payments";
+import notificationRoutes from "./routes/notifications";
+import chatRoutes from "./routes/chat";
 
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { env, isProduction } from "./config/env";
@@ -118,6 +120,8 @@ app.use("/api/freelancer", freelancerRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/chat", chatRoutes);
 app.use("/api/public", publicRoutes);
 app.use("/api/admin", adminRoutes);
 

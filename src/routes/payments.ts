@@ -19,6 +19,8 @@ import { authenticate } from "../middleware/auth";
 import { requireCustomer, requireCustomerOrAdmin } from "../middleware/roles";
 import { AuthRequest } from "../types";
 import { successResponse, errorResponse } from "../utils/response";
+import { createNotification } from "../utils/notifications";
+import { canTransitionRequest } from "../utils/stateTransitions";
 
 const router = Router();
 
@@ -113,11 +115,11 @@ router.post(
         );
       }
 
-      if (booking.booking_status !== "confirmed") {
+      if (!["payment_pending", "confirmed"].includes(booking.booking_status)) {
         return errorResponse(
           res,
           "CONFLICT",
-          "예약 확정 상태에서만 결제할 수 있습니다.",
+          "프리랜서 수락 또는 가격 확정 후 결제할 수 있습니다.",
           [],
           409
         );
@@ -267,8 +269,8 @@ router.post(
         );
       }
 
-      await prisma.$transaction([
-        prisma.payment.update({
+      await prisma.$transaction(async (tx) => {
+        await tx.payment.update({
           where: {
             order_id: body.order_id,
           },
@@ -284,16 +286,40 @@ router.post(
               : null,
             raw_response: toPrismaJson(tossData),
           },
-        }),
-        prisma.booking.update({
+        });
+
+        const confirmedBooking = await tx.booking.update({
           where: {
             id: payment.booking_id,
           },
           data: {
             payment_status: "fully_paid",
+            booking_status: "confirmed",
           },
-        }),
-      ]);
+          include: {
+            freelancer: { select: { user_id: true } },
+            request: true,
+          },
+        });
+
+        if (
+          confirmedBooking.request &&
+          canTransitionRequest(confirmedBooking.request.status, "booked")
+        ) {
+          await tx.eventRequest.update({
+            where: { id: confirmedBooking.request.id },
+            data: { status: "booked" },
+          });
+        }
+
+        await createNotification(tx, {
+          user_id: confirmedBooking.freelancer.user_id,
+          type: "payment_completed",
+          title: "결제 완료",
+          message: `${confirmedBooking.event_title} 결제가 완료되었습니다.`,
+          link_url: `/freelancer/bookings`,
+        });
+      });
 
       return successResponse(
         res,

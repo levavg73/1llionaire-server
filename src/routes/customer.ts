@@ -12,6 +12,7 @@ import {
   parsePagination,
 } from "../utils/response";
 import { generateAiRecommendationsForRequest } from "../services/aiMatching";
+import { attachSignedProfileImageUrl } from "../utils/profileImages";
 import {
   eventDateString,
   optionalHttpsUrl,
@@ -194,6 +195,7 @@ router.get(
                   id: true,
                   display_name: true,
                   profile_image_url: true,
+                  profile_image_path: true,
                   headline: true,
                   categories: true,
                   region: true,
@@ -218,7 +220,17 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
       }
 
-      return successResponse(res, request);
+      const responseRequest = {
+        ...request,
+        recommendations: await Promise.all(
+          request.recommendations.map(async (recommendation) => ({
+            ...recommendation,
+            freelancer: await attachSignedProfileImageUrl(recommendation.freelancer),
+          }))
+        ),
+      };
+
+      return successResponse(res, responseRequest);
     } catch (err) {
       next(err);
     }
@@ -321,6 +333,7 @@ router.get(
               id: true,
               display_name: true,
               profile_image_url: true,
+              profile_image_path: true,
               headline: true,
               categories: true,
               styles: true,
@@ -350,7 +363,14 @@ router.get(
         data: { status: "viewed" },
       });
 
-      return successResponse(res, recommendations);
+      const responseRecommendations = await Promise.all(
+        recommendations.map(async (recommendation) => ({
+          ...recommendation,
+          freelancer: await attachSignedProfileImageUrl(recommendation.freelancer),
+        }))
+      );
+
+      return successResponse(res, responseRecommendations);
     } catch (err) {
       next(err);
     }

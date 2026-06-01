@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import prisma from "../config/database";
 import { successResponse, listResponse, parsePagination, errorResponse } from "../utils/response";
@@ -14,6 +15,7 @@ const freelancerListQuerySchema = z
     min_price: z.coerce.number().int().min(0).optional(),
     max_price: z.coerce.number().int().min(0).optional(),
     q: z.string().trim().min(1).max(100).optional(),
+    sort: z.enum(["latest", "popular", "reviews"]).default("popular"),
   })
   .superRefine((query, ctx) => {
     if (query.min_price !== undefined && query.max_price !== undefined && query.min_price > query.max_price) {
@@ -25,6 +27,19 @@ const freelancerListQuerySchema = z
     }
   });
 
+type FreelancerListSort = z.infer<typeof freelancerListQuerySchema>["sort"];
+
+function getFreelancerOrderBy(sort: FreelancerListSort): Prisma.FreelancerProfileOrderByWithRelationInput[] {
+  if (sort === "latest") {
+    return [{ approved_at: "desc" }, { created_at: "desc" }];
+  }
+
+  if (sort === "reviews") {
+    return [{ review_count: "desc" }, { avg_rating: "desc" }, { created_at: "desc" }];
+  }
+
+  return [{ avg_rating: "desc" }, { review_count: "desc" }, { created_at: "desc" }];
+}
 
 // GET /api/public/freelancers - 승인된 진행자 목록
 router.get(
@@ -33,7 +48,7 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>);
-      const { category, region, language, min_price, max_price, q } = freelancerListQuerySchema.parse(req.query);
+      const { category, region, language, min_price, max_price, q, sort } = freelancerListQuerySchema.parse(req.query);
 
       const where: Record<string, unknown> = {
         status: "approved",
@@ -56,7 +71,7 @@ router.get(
           where,
           skip,
           take: limit,
-          orderBy: [{ avg_rating: "desc" }, { review_count: "desc" }],
+          orderBy: getFreelancerOrderBy(sort),
           select: {
             id: true,
             display_name: true,
@@ -87,7 +102,12 @@ router.get(
         prisma.freelancerProfile.count({ where }),
       ]);
 
-      return listResponse(res, items, total, page, limit);
+      const safeItems = items.map((item) => ({
+        ...item,
+        profile_image_url: null,
+      }));
+
+      return listResponse(res, safeItems, total, page, limit);
     } catch (err) {
       next(err);
     }
@@ -144,7 +164,7 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "진행자를 찾을 수 없습니다.", [], 404);
       }
 
-      return successResponse(res, profile);
+      return successResponse(res, { ...profile, profile_image_url: null });
     } catch (err) {
       next(err);
     }

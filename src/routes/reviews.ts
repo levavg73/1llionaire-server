@@ -7,6 +7,7 @@ import { requireCustomer } from "../middleware/roles";
 import { AuthRequest } from "../types";
 import { successResponse, errorResponse, listResponse, parsePagination } from "../utils/response";
 import { canTransitionRequest } from "../utils/stateTransitions";
+import { attachSignedProfileImageUrl } from "../utils/profileImages";
 
 const router = Router();
 
@@ -128,13 +129,20 @@ router.get(
           orderBy: { created_at: "desc" },
           include: {
             booking: { select: { event_title: true, event_date: true } },
-            freelancer: { select: { display_name: true, profile_image_url: true } },
+            freelancer: { select: { display_name: true, profile_image_url: true, profile_image_path: true } },
           },
         }),
         prisma.review.count({ where }),
       ]);
 
-      return listResponse(res, items, total, page, limit);
+      const responseItems = await Promise.all(
+        items.map(async (item) => ({
+          ...item,
+          freelancer: await attachSignedProfileImageUrl(item.freelancer),
+        }))
+      );
+
+      return listResponse(res, responseItems, total, page, limit);
     } catch (err) {
       next(err);
     }

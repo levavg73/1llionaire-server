@@ -11,6 +11,7 @@ import {
   hashRefreshToken,
   setAuthCookies,
 } from "../utils/authTokens";
+import { attachSignedProfileImageUrl } from "../utils/profileImages";
 
 const router = Router();
 
@@ -258,6 +259,7 @@ router.get("/me", authenticate, async (req: AuthRequest, res: Response, next: Ne
             id: true,
             display_name: true,
             profile_image_url: true,
+            profile_image_path: true,
             headline: true,
             status: true,
             avg_rating: true,
@@ -271,7 +273,14 @@ router.get("/me", authenticate, async (req: AuthRequest, res: Response, next: Ne
       return errorResponse(res, "NOT_FOUND", "사용자를 찾을 수 없습니다.", [], 404);
     }
 
-    return successResponse(res, user);
+    const responseUser = user.freelancer_profile
+      ? {
+          ...user,
+          freelancer_profile: await attachSignedProfileImageUrl(user.freelancer_profile),
+        }
+      : user;
+
+    return successResponse(res, responseUser);
   } catch (err) {
     next(err);
   }

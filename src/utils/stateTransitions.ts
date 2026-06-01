@@ -10,14 +10,23 @@ export type RequestStatus =
   | "canceled"
   | "disputed";
 
-export type BookingStatus = "pending" | "confirmed" | "completed" | "canceled" | "disputed";
+export type BookingStatus =
+  | "pending"
+  | "negotiating"
+  | "accepted"
+  | "rejected"
+  | "payment_pending"
+  | "confirmed"
+  | "completed"
+  | "canceled"
+  | "disputed";
 
 export const requestTransitions: Record<RequestStatus, RequestStatus[]> = {
   submitted: ["reviewing", "canceled"],
   reviewing: ["recommending", "canceled", "disputed"],
   recommending: ["recommended", "canceled", "disputed"],
   recommended: ["consulting", "booked", "canceled", "disputed"],
-  consulting: ["booked", "canceled", "disputed"],
+  consulting: ["recommended", "booked", "canceled", "disputed"],
   booked: ["completed", "disputed"],
   completed: ["reviewed"],
   reviewed: [],
@@ -26,7 +35,11 @@ export const requestTransitions: Record<RequestStatus, RequestStatus[]> = {
 };
 
 export const bookingTransitions: Record<BookingStatus, BookingStatus[]> = {
-  pending: ["confirmed", "canceled", "disputed"],
+  pending: ["negotiating", "accepted", "rejected", "payment_pending", "canceled", "disputed"],
+  negotiating: ["accepted", "rejected", "payment_pending", "canceled", "disputed"],
+  accepted: ["payment_pending", "confirmed", "canceled", "disputed"],
+  rejected: [],
+  payment_pending: ["confirmed", "canceled", "disputed"],
   confirmed: ["completed", "canceled", "disputed"],
   completed: [],
   canceled: [],

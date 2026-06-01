@@ -57,6 +57,10 @@ enum QuoteStatus {
 
 enum BookingStatus {
   pending
+  negotiating
+  accepted
+  rejected
+  payment_pending
   confirmed
   completed
   canceled
@@ -108,6 +112,11 @@ model User {
   quotes             Quote[]            @relation("QuotedBy")
   bookings_as_customer  Booking[]       @relation("CustomerBookings")
   reviews_written    Review[]           @relation("CustomerReviews")
+  notifications       Notification[]
+  chat_rooms_as_customer ChatRoom[]       @relation("CustomerChatRooms")
+  sent_chat_messages  ChatMessage[]      @relation("SentChatMessages")
+  sent_booking_offers BookingOffer[]     @relation("SentBookingOffers")
+  received_booking_offers BookingOffer[] @relation("ReceivedBookingOffers")
   refresh_tokens      RefreshToken[]
 
   @@index([email])
@@ -136,6 +145,7 @@ model FreelancerProfile {
   user_id                  String           @unique
   display_name             String?
   profile_image_url        String?
+  profile_image_path       String?
   headline                 String?
   bio                      String?
   region                   String?
@@ -163,6 +173,7 @@ model FreelancerProfile {
   recommendations Recommendation[]
   quotes        Quote[]
   bookings      Booking[]       @relation("FreelancerBookings")
+  chat_rooms    ChatRoom[]      @relation("FreelancerChatRooms")
   reviews       Review[]        @relation("FreelancerReviews")
 
   @@index([status])
@@ -298,12 +309,91 @@ model Booking {
   quote      Quote?            @relation(fields: [quote_id], references: [id])
   reviews    Review[]
   payment    Payment?
+  chat_room  ChatRoom?
+  offers     BookingOffer[]
 
   @@index([customer_id])
   @@index([freelancer_id])
   @@index([booking_status])
   @@index([payment_status])
   @@map("bookings")
+}
+
+model Notification {
+  id         String   @id @default(cuid())
+  user_id    String
+  type       String
+  title      String
+  message    String
+  link_url   String?
+  is_read    Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, is_read, created_at])
+  @@map("notifications")
+}
+
+model ChatRoom {
+  id              String   @id @default(cuid())
+  booking_id      String   @unique
+  customer_id     String
+  freelancer_id   String
+  last_message_at DateTime?
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  booking    Booking           @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  customer   User              @relation("CustomerChatRooms", fields: [customer_id], references: [id])
+  freelancer FreelancerProfile @relation("FreelancerChatRooms", fields: [freelancer_id], references: [id])
+  messages   ChatMessage[]
+
+  @@index([customer_id])
+  @@index([freelancer_id])
+  @@index([last_message_at])
+  @@map("chat_rooms")
+}
+
+model ChatMessage {
+  id           String   @id @default(cuid())
+  room_id      String
+  sender_id    String?
+  message      String
+  message_type String   @default("text")
+  offer_id     String?
+  is_read      Boolean  @default(false)
+  created_at   DateTime @default(now())
+
+  room   ChatRoom      @relation(fields: [room_id], references: [id], onDelete: Cascade)
+  sender User?         @relation("SentChatMessages", fields: [sender_id], references: [id])
+  offer  BookingOffer? @relation(fields: [offer_id], references: [id])
+
+  @@index([room_id, created_at])
+  @@index([sender_id])
+  @@map("chat_messages")
+}
+
+model BookingOffer {
+  id           String    @id @default(cuid())
+  booking_id   String
+  sender_id    String
+  receiver_id  String
+  amount       Int
+  message      String?
+  status       String    @default("pending")
+  responded_at DateTime?
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @updatedAt
+
+  booking       Booking       @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  sender        User          @relation("SentBookingOffers", fields: [sender_id], references: [id])
+  receiver      User          @relation("ReceivedBookingOffers", fields: [receiver_id], references: [id])
+  chat_messages ChatMessage[]
+
+  @@index([booking_id, status])
+  @@index([receiver_id, status])
+  @@map("booking_offers")
 }
 
 model Review {

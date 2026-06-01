@@ -12,6 +12,7 @@ import {
   parsePagination,
 } from "../utils/response";
 import { canTransitionBooking, canTransitionRequest } from "../utils/stateTransitions";
+import { attachSignedProfileImageUrl, attachSignedProfileImageUrls } from "../utils/profileImages";
 
 const router = Router();
 
@@ -37,7 +38,7 @@ const requestStatusQuerySchema = z.object({
 });
 
 const bookingListQuerySchema = z.object({
-  booking_status: z.enum(["pending", "confirmed", "completed", "canceled", "disputed"]).optional(),
+  booking_status: z.enum(["pending", "negotiating", "accepted", "rejected", "payment_pending", "confirmed", "completed", "canceled", "disputed"]).optional(),
   payment_status: z.enum(["unpaid", "deposit_paid", "fully_paid", "refunded", "failed"]).optional(),
 });
 
@@ -74,7 +75,7 @@ router.get("/dashboard", async (_req: AuthRequest, res: Response, next: NextFunc
       prisma.eventRequest.count({ where: { status: "submitted" } }),
       prisma.eventRequest.count({ where: { status: { in: ["reviewing", "recommending"] } } }),
       prisma.freelancerProfile.count({ where: { status: "pending_review" } }),
-      prisma.booking.count({ where: { booking_status: "confirmed" } }),
+      prisma.booking.count({ where: { booking_status: { in: ["payment_pending", "confirmed"] } } }),
       prisma.booking.count({ where: { booking_status: "completed" } }),
       prisma.booking.count({ where: { payment_status: "unpaid" } }),
       prisma.booking.count({ where: { settlement_status: { in: ["pending", "scheduled"] } } }),
@@ -121,7 +122,9 @@ router.get("/freelancers", async (req: AuthRequest, res: Response, next: NextFun
       prisma.freelancerProfile.count({ where }),
     ]);
 
-    return listResponse(res, items, total, page, limit);
+    const responseItems = await attachSignedProfileImageUrls(items);
+
+    return listResponse(res, responseItems, total, page, limit);
   } catch (err) {
     next(err);
   }
@@ -218,6 +221,7 @@ router.get("/requests/:id", async (req: AuthRequest, res: Response, next: NextFu
                 id: true,
                 display_name: true,
                 profile_image_url: true,
+                profile_image_path: true,
                 categories: true,
                 region: true,
                 avg_rating: true,
@@ -241,7 +245,17 @@ router.get("/requests/:id", async (req: AuthRequest, res: Response, next: NextFu
       return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
     }
 
-    return successResponse(res, request);
+    const responseRequest = {
+      ...request,
+      recommendations: await Promise.all(
+        request.recommendations.map(async (recommendation) => ({
+          ...recommendation,
+          freelancer: await attachSignedProfileImageUrl(recommendation.freelancer),
+        }))
+      ),
+    };
+
+    return successResponse(res, responseRequest);
   } catch (err) {
     next(err);
   }
@@ -392,7 +406,7 @@ router.get("/bookings", async (req: AuthRequest, res: Response, next: NextFuncti
 router.patch("/bookings/:id", async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const schema = z.object({
-      booking_status: z.enum(["pending", "confirmed", "completed", "canceled", "disputed"]).optional(),
+      booking_status: z.enum(["pending", "negotiating", "accepted", "rejected", "payment_pending", "confirmed", "completed", "canceled", "disputed"]).optional(),
       payment_status: z.enum(["unpaid", "deposit_paid", "fully_paid", "refunded", "failed"]).optional(),
       settlement_status: z.enum(["pending", "scheduled", "completed", "held", "failed"]).optional(),
       cancel_reason: z.string().optional(),
