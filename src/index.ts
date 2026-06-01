@@ -26,7 +26,13 @@ const PORT = env.PORT;
 
 // ─── 보안 미들웨어 ───────────────────────────────────────────
 
-app.use(helmet());
+app.set("trust proxy", 1);
+
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
 const allowedOrigins = [env.CLIENT_URL, env.CLIENT_URL_PROD].filter(Boolean) as string[];
 

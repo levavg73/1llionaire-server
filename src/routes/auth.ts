@@ -33,6 +33,10 @@ const loginSchema = z.object({
   password: z.string().min(1, "비밀번호를 입력해 주세요."),
 });
 
+const passwordResetRequestSchema = z.object({
+  email: z.string().email("유효한 이메일을 입력해 주세요."),
+});
+
 const updateMeSchema = z.object({
   name: z.string().min(1).max(50).optional(),
   phone: z.string().optional(),
@@ -46,6 +50,34 @@ const publicUserSelect = {
   phone: true,
   created_at: true,
 } as const;
+
+
+// ── POST /api/auth/password-reset/request ───────────────────
+// 현재 프로젝트에는 이메일 발송 서비스가 아직 연결되어 있지 않습니다.
+// 보안상 임시 비밀번호를 화면에 노출하지 않고, 계정 존재 여부도 노출하지 않습니다.
+// SendGrid/Resend 등을 연결하면 이 라우트에서 재설정 링크 발송 로직을 붙이면 됩니다.
+router.post("/password-reset/request", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = passwordResetRequestSchema.parse(req.body);
+
+    const user = await prisma.user.findUnique({
+      where: { email: body.email },
+      select: { id: true, email: true, is_active: true },
+    });
+
+    if (user?.is_active) {
+      console.log(`[password-reset] request accepted for ${user.email}`);
+    }
+
+    return successResponse(
+      res,
+      null,
+      "계정이 존재한다면 비밀번호 재설정 안내가 발송됩니다."
+    );
+  } catch (err) {
+    next(err);
+  }
+});
 
 // ── POST /api/auth/signup ───────────────────────────────────
 

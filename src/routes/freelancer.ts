@@ -1,4 +1,7 @@
 import { Router, Response, NextFunction } from "express";
+import crypto from "node:crypto";
+import multer from "multer";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
@@ -19,32 +22,119 @@ import {
 
 const router = Router();
 
+const PROFILE_IMAGE_MAX_SIZE = 5 * 1024 * 1024;
+const PROFILE_IMAGE_BUCKET = process.env.SUPABASE_PROFILE_IMAGE_BUCKET ?? "profile-images";
+const allowedProfileImageMimeTypes = new Set(["image/jpeg", "image/png"]);
+
+let supabaseAdminClient: SupabaseClient | null = null;
+
+function getSupabaseAdminClient() {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error("Supabase Storage 환경변수가 설정되지 않았습니다.");
+  }
+
+  if (!supabaseAdminClient) {
+    supabaseAdminClient = createClient(supabaseUrl, supabaseKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    });
+  }
+
+  return supabaseAdminClient;
+}
+
+function getProfileImageExtension(file: Express.Multer.File) {
+  if (file.mimetype === "image/png") return ".png";
+  return ".jpg";
+}
+
+function hasValidProfileImageSignature(file: Express.Multer.File) {
+  const { buffer } = file;
+
+  if (file.mimetype === "image/png") {
+    const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    return buffer.length >= pngSignature.length && buffer.subarray(0, pngSignature.length).equals(pngSignature);
+  }
+
+  if (file.mimetype === "image/jpeg") {
+    return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+
+  return false;
+}
+
+function buildProfileImageStoragePath(userId: string, file: Express.Multer.File) {
+  return `freelancers/${userId}/${Date.now()}-${crypto.randomUUID()}${getProfileImageExtension(file)}`;
+}
+
+const profileImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: PROFILE_IMAGE_MAX_SIZE,
+    files: 1,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (!allowedProfileImageMimeTypes.has(file.mimetype)) {
+      cb(new Error("프로필 이미지는 JPG 또는 PNG 파일만 업로드할 수 있습니다."));
+      return;
+    }
+
+    cb(null, true);
+  },
+});
+
+function handleProfileImageUpload(req: AuthRequest, res: Response, next: NextFunction) {
+  profileImageUpload.single("image")(req, res, (err: unknown) => {
+    if (!err) {
+      next();
+      return;
+    }
+
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      return errorResponse(res, "BAD_REQUEST", "프로필 이미지는 5MB 이하만 업로드할 수 있습니다.", [], 400);
+    }
+
+    const message = err instanceof Error ? err.message : "프로필 이미지 업로드 요청이 올바르지 않습니다.";
+    return errorResponse(res, "BAD_REQUEST", message, [], 400);
+  });
+}
+
 // ── Zod 스키마 ──────────────────────────────────────────────
 
 const profileSchema = z
   .object({
-    display_name: z.string().trim().min(1, "활동명을 입력해 주세요.").max(50).optional(),
-    profile_image_url: optionalHttpsUrl,
-    headline: optionalShortText(150),
-    bio: optionalShortText(2000),
-    region: optionalShortText(100),
+    display_name: z.string().trim().min(1, "활동명을 입력해 주세요.").max(50),
+    profile_image_url: z
+      .string({ required_error: "프로필 이미지를 업로드해 주세요." })
+      .url("유효한 이미지 URL이 아닙니다.")
+      .max(2048, "이미지 URL은 2048자 이하로 입력해 주세요."),
+    headline: z.string().trim().min(1, "한 줄 소개를 입력해 주세요.").max(150),
+    bio: z.string().trim().min(1, "자기소개를 입력해 주세요.").max(2000),
+    region: z.string().trim().min(1, "활동 지역을 입력해 주세요.").max(100),
     available_regions: optionalStringArray(30, 50),
     categories: optionalStringArray(20, 50),
     styles: optionalStringArray(20, 50),
     career_years: z.number().int().min(0).max(50).optional(),
-    base_price_min: z.number().int().min(0).optional(),
-    base_price_max: z.number().int().min(0).optional(),
+    base_price_min: z
+      .number({ required_error: "최소 가격을 입력해 주세요." })
+      .int()
+      .min(0, "최소 가격은 0원 이상이어야 합니다."),
+    base_price_max: z
+      .number({ required_error: "최대 가격을 입력해 주세요." })
+      .int()
+      .min(0, "최대 가격은 0원 이상이어야 합니다."),
     languages: optionalStringArray(20, 50),
     script_writing_available: z.boolean().optional(),
     rehearsal_available: z.boolean().optional(),
     travel_available: z.boolean().optional(),
   })
   .superRefine((body, ctx) => {
-    if (
-      body.base_price_min !== undefined &&
-      body.base_price_max !== undefined &&
-      body.base_price_min > body.base_price_max
-    ) {
+    if (body.base_price_min > body.base_price_max) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["base_price_max"],
@@ -80,6 +170,62 @@ const quoteSchema = z.object({
 });
 
 // ─── 프로필 ─────────────────────────────────────────────────
+
+// POST /api/freelancer/profile-image - Supabase Storage 프로필 이미지 업로드
+router.post(
+  "/profile-image",
+  authenticate,
+  requireFreelancer,
+  handleProfileImageUpload,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const file = req.file;
+
+      if (!file) {
+        return errorResponse(res, "BAD_REQUEST", "업로드할 프로필 이미지를 선택해 주세요.", [], 400);
+      }
+
+      if (!hasValidProfileImageSignature(file)) {
+        return errorResponse(res, "BAD_REQUEST", "프로필 이미지는 정상적인 JPG 또는 PNG 파일만 업로드할 수 있습니다.", [], 400);
+      }
+
+      let supabase;
+      try {
+        supabase = getSupabaseAdminClient();
+      } catch (err) {
+        console.error("[supabase-storage-config-error]", err);
+        return errorResponse(res, "SERVER_ERROR", "프로필 이미지 저장소 설정이 누락되었습니다.", [], 500);
+      }
+
+      const storagePath = buildProfileImageStoragePath(req.user!.userId, file);
+      const { data, error } = await supabase.storage
+        .from(PROFILE_IMAGE_BUCKET)
+        .upload(storagePath, file.buffer, {
+          contentType: file.mimetype,
+          cacheControl: "31536000",
+          upsert: false,
+        });
+
+      if (error || !data) {
+        console.error("[supabase-profile-image-upload-error]", error);
+        return errorResponse(res, "SERVER_ERROR", "프로필 이미지 업로드에 실패했습니다.", [], 500);
+      }
+
+      const { data: publicUrlData } = supabase.storage
+        .from(PROFILE_IMAGE_BUCKET)
+        .getPublicUrl(data.path);
+
+      return successResponse(
+        res,
+        { url: publicUrlData.publicUrl, path: data.path },
+        "프로필 이미지가 업로드되었습니다.",
+        201
+      );
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // POST /api/freelancer/profile - 등록 신청
 router.post(

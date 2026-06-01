@@ -1,4 +1,5 @@
 import { Router, Response, NextFunction } from "express";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
@@ -10,6 +11,7 @@ import {
   listResponse,
   parsePagination,
 } from "../utils/response";
+import { generateAiRecommendationsForRequest } from "../services/aiMatching";
 import {
   eventDateString,
   optionalHttpsUrl,
@@ -76,18 +78,52 @@ router.post(
   async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const body = createRequestSchema.parse(req.body);
+      const eventDate = new Date(body.event_date);
 
-      const request = await prisma.eventRequest.create({
-        data: {
-          ...body,
-          event_date: new Date(body.event_date),
-          attachment_url: body.attachment_url || null,
-          customer_id: req.user!.userId,
-          status: "submitted",
-        },
+      const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const request = await tx.eventRequest.create({
+          data: {
+            ...body,
+            event_date: eventDate,
+            attachment_url: body.attachment_url || null,
+            customer_id: req.user!.userId,
+            status: "submitted",
+          },
+        });
+
+        const matching = await generateAiRecommendationsForRequest({
+          tx,
+          request: {
+            id: request.id,
+            event_type: request.event_type,
+            event_date: request.event_date,
+            start_time: request.start_time,
+            end_time: request.end_time,
+            region: request.region,
+            budget_min: request.budget_min,
+            budget_max: request.budget_max,
+            preferred_freelancer_type: request.preferred_freelancer_type,
+            preferred_styles: request.preferred_styles,
+            required_language: request.required_language,
+            script_required: request.script_required,
+            rehearsal_required: request.rehearsal_required,
+            travel_required: request.travel_required,
+          },
+          recommendedByUserId: req.user!.userId,
+        });
+
+        const finalRequest = matching.count > 0
+          ? await tx.eventRequest.findUniqueOrThrow({ where: { id: request.id } })
+          : request;
+
+        return { request: finalRequest, matching };
       });
 
-      return successResponse(res, request, "요청서가 등록되었습니다.", 201);
+      const message = result.matching.count > 0
+        ? `요청서가 등록되었습니다. AI 데이터 매칭으로 추천 후보 ${result.matching.count}명을 찾았습니다.`
+        : "요청서가 등록되었습니다. 조건에 맞는 후보를 추가 확인 중입니다.";
+
+      return successResponse(res, result.request, message, 201);
     } catch (err) {
       next(err);
     }

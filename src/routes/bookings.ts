@@ -99,11 +99,28 @@ router.post(
             orderBy: { created_at: "desc" },
           });
 
-      if (!quote) {
-        return errorResponse(res, "VALIDATION_ERROR", "예약 생성을 위해 유효한 견적이 필요합니다.", [], 400);
+      const freelancer = await prisma.freelancerProfile.findUnique({
+        where: { id: body.freelancer_id },
+        select: { base_price_min: true, base_price_max: true },
+      });
+
+      const fallbackPrice =
+        request.budget_max ??
+        request.budget_min ??
+        freelancer?.base_price_min ??
+        freelancer?.base_price_max;
+
+      if (!quote && !fallbackPrice) {
+        return errorResponse(
+          res,
+          "VALIDATION_ERROR",
+          "예약 생성을 위해 견적 또는 기준 금액이 필요합니다.",
+          [],
+          400
+        );
       }
 
-      const finalPrice = quote.price;
+      const finalPrice = quote?.price ?? fallbackPrice!;
       const platformFee = Math.floor(finalPrice * BOOKING_PLATFORM_FEE_RATE);
       const freelancerAmount = finalPrice - platformFee;
 
@@ -113,7 +130,7 @@ router.post(
             request_id: request.id,
             customer_id: request.customer_id,
             freelancer_id: body.freelancer_id,
-            quote_id: quote.id,
+            quote_id: quote?.id,
             event_title: request.event_title,
             event_date: request.event_date,
             start_time: request.start_time,
@@ -133,10 +150,12 @@ router.post(
           data: { status: "booked" },
         });
 
-        await tx.quote.update({
-          where: { id: quote.id },
-          data: { status: "accepted" },
-        });
+        if (quote) {
+          await tx.quote.update({
+            where: { id: quote.id },
+            data: { status: "accepted" },
+          });
+        }
 
         await tx.recommendation.update({
           where: { id: recommendation.id },
