@@ -4,6 +4,7 @@ import { z } from "zod";
 import prisma from "../config/database";
 import { successResponse, listResponse, parsePagination, errorResponse } from "../utils/response";
 import { setPublicCache } from "../utils/cache";
+import { attachSignedProfileImageUrl, attachSignedProfileImageUrls } from "../utils/profileImages";
 
 const router = Router();
 
@@ -76,6 +77,7 @@ router.get(
             id: true,
             display_name: true,
             profile_image_url: true,
+            profile_image_path: true,
             headline: true,
             categories: true,
             styles: true,
@@ -102,12 +104,10 @@ router.get(
         prisma.freelancerProfile.count({ where }),
       ]);
 
-      const safeItems = items.map((item) => ({
-        ...item,
-        profile_image_url: null,
-      }));
+      const signedItems = await attachSignedProfileImageUrls(items);
+      const publicItems = signedItems.map(({ profile_image_path, ...item }) => item);
 
-      return listResponse(res, safeItems, total, page, limit);
+      return listResponse(res, publicItems, total, page, limit);
     } catch (err) {
       next(err);
     }
@@ -126,6 +126,7 @@ router.get(
           id: true,
           display_name: true,
           profile_image_url: true,
+          profile_image_path: true,
           headline: true,
           bio: true,
           region: true,
@@ -164,7 +165,10 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "진행자를 찾을 수 없습니다.", [], 404);
       }
 
-      return successResponse(res, { ...profile, profile_image_url: null });
+      const signedProfile = await attachSignedProfileImageUrl(profile);
+      const { profile_image_path, ...publicProfile } = signedProfile;
+
+      return successResponse(res, publicProfile);
     } catch (err) {
       next(err);
     }
