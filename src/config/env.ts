@@ -12,7 +12,9 @@ const envSchema = z.object({
 
   // ─── 서버 ─────────────────────────────────────────────────
   PORT: z.coerce.number().int().positive().default(4000),
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  NODE_ENV: z
+    .enum(["development", "test", "production"])
+    .default("development"),
 
   // ─── CORS / Origin ────────────────────────────────────────
   CLIENT_URL: z.string().url("CLIENT_URL must be a valid URL"),
@@ -21,18 +23,43 @@ const envSchema = z.object({
   // ─── 토스페이먼츠 ─────────────────────────────────────────
   TOSS_SECRET_KEY: z
     .string()
-    .min(1, "TOSS_SECRET_KEY is required")
+    .optional()
     .refine(
-      (v: string) => v.startsWith("test_sk_") || v.startsWith("live_sk_"),
+      (v) =>
+        !v || v.startsWith("test_sk_") || v.startsWith("live_sk_"),
       "TOSS_SECRET_KEY는 test_sk_ 또는 live_sk_로 시작해야 합니다."
     ),
   TOSS_CLIENT_KEY: z
     .string()
-    .min(1, "TOSS_CLIENT_KEY is required")
+    .optional()
     .refine(
-      (v: string) => v.startsWith("test_ck_") || v.startsWith("live_ck_"),
+      (v) =>
+        !v || v.startsWith("test_ck_") || v.startsWith("live_ck_"),
       "TOSS_CLIENT_KEY는 test_ck_ 또는 live_ck_로 시작해야 합니다."
     ),
+
+  // ─── Supabase Storage ─────────────────────────────────────
+  SUPABASE_URL: z.string().url().optional(),
+  SUPABASE_SECRET_KEY: z.string().optional(),
+  SUPABASE_PROFILE_IMAGE_BUCKET: z.string().default("profile-images"),
+
+  // ─── 소셜 로그인 (카카오) ─────────────────────────────────
+  KAKAO_CLIENT_ID: z.string().optional(),
+  KAKAO_CLIENT_SECRET: z.string().optional(),
+  // 카카오 OAuth redirect URI: 서버 콜백 URL
+  // ex) https://api.freemic.co.kr/api/auth/oauth/kakao/callback
+  KAKAO_REDIRECT_URI: z.string().url().optional(),
+
+  // ─── 소셜 로그인 (구글) ───────────────────────────────────
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_REDIRECT_URI: z.string().url().optional(),
+
+  // ─── AI (Anthropic Claude) ────────────────────────────────
+  ANTHROPIC_API_KEY: z.string().optional(),
+
+  // ─── 에스크로 자동 릴리즈 (행사 완료 후 N일) ───────────────
+  ESCROW_AUTO_RELEASE_DAYS: z.coerce.number().int().min(1).default(7),
 
   // ─── Seed 전용 ────────────────────────────────────────────
   ADMIN_EMAIL: z.string().email().optional(),
@@ -42,3 +69,21 @@ const envSchema = z.object({
 export const env = envSchema.parse(process.env);
 
 export const isProduction = env.NODE_ENV === "production";
+
+// 결제 키 런타임 검증 헬퍼 (payments.ts에서 호출)
+export function requireTossKeys(): { secretKey: string; clientKey: string } {
+  if (!env.TOSS_SECRET_KEY || !env.TOSS_CLIENT_KEY) {
+    throw new Error(
+      "TOSS_SECRET_KEY 또는 TOSS_CLIENT_KEY 환경변수가 설정되지 않았습니다."
+    );
+  }
+  return { secretKey: env.TOSS_SECRET_KEY, clientKey: env.TOSS_CLIENT_KEY };
+}
+
+// AI 키 런타임 검증 헬퍼 (ai.ts에서 호출)
+export function requireAnthropicKey(): string {
+  if (!env.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다.");
+  }
+  return env.ANTHROPIC_API_KEY;
+}

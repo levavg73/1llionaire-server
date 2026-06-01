@@ -6,16 +6,20 @@ import morgan from "morgan";
 import rateLimit from "express-rate-limit";
 
 import authRoutes from "./routes/auth";
+import oauthRoutes from "./routes/oauth";
 import usersRoutes from "./routes/users";
 import customerRoutes from "./routes/customer";
 import freelancerRoutes from "./routes/freelancer";
 import publicRoutes from "./routes/public";
 import bookingRoutes from "./routes/bookings";
 import reviewRoutes from "./routes/reviews";
+import freelancerReviewRoutes from "./routes/freelancer-reviews";
 import adminRoutes from "./routes/admin";
 import paymentRoutes from "./routes/payments";
 import notificationRoutes from "./routes/notifications";
 import chatRoutes from "./routes/chat";
+import contractRoutes from "./routes/contracts";
+import aiRoutes from "./routes/ai";
 
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { env, isProduction } from "./config/env";
@@ -36,11 +40,16 @@ app.use(
   })
 );
 
-const allowedOrigins = [env.CLIENT_URL, env.CLIENT_URL_PROD].filter(Boolean) as string[];
+const allowedOrigins = [env.CLIENT_URL, env.CLIENT_URL_PROD].filter(
+  Boolean
+) as string[];
 
 app.use(
   cors({
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void
+    ) => {
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       return callback(new Error("CORS 정책에 의해 차단되었습니다."));
@@ -51,12 +60,10 @@ app.use(
   })
 );
 
-// Cookie 기반 unsafe 메서드 Origin 검증
 app.use(verifyTrustedOrigin(allowedOrigins));
 
 // ─── Rate Limiting ───────────────────────────────────────────
 
-// 전역 (IP당 15분/200회)
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
@@ -64,11 +71,14 @@ const globalLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     success: false,
-    error: { code: "SERVER_ERROR", message: "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.", details: [] },
+    error: {
+      code: "SERVER_ERROR",
+      message: "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+      details: [],
+    },
   },
 });
 
-// 인증 엔드포인트 강화 (IP당 15분/20회 — brute-force 방어)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -76,7 +86,27 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     success: false,
-    error: { code: "SERVER_ERROR", message: "로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.", details: [] },
+    error: {
+      code: "SERVER_ERROR",
+      message: "로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+      details: [],
+    },
+  },
+});
+
+// AI 분석은 별도 rate limit (모델 비용 보호)
+const aiLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1시간
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: {
+      code: "SERVER_ERROR",
+      message: "AI 분석 요청 횟수를 초과했습니다. 1시간 후 다시 시도해 주세요.",
+      details: [],
+    },
   },
 });
 
@@ -90,7 +120,6 @@ app.use(noStoreForPrivateApi);
 if (!isProduction) {
   app.use(morgan("dev"));
 } else {
-  // 운영 환경: IP/메서드/상태코드/응답시간만 기록 (바디·쿠키 제외)
   app.use(morgan(":remote-addr :method :url :status - :response-time ms"));
 }
 
@@ -106,22 +135,33 @@ app.get("/health", (_req: express.Request, res: express.Response) => {
 
 // ─── 라우트 ────────────────────────────────────────────────
 
-// 인증 (login/signup/refresh는 authLimiter 적용)
+// 인증
 app.use("/api/auth/login", authLimiter);
 app.use("/api/auth/signup", authLimiter);
 app.use("/api/auth/refresh", authLimiter);
 app.use("/api/auth", authRoutes);
 
-// 사용자 정보 수정 — 전용 라우터 (기존 authRoutes 재마운트 버그 수정)
+// 소셜 로그인 (rate limit 동일 적용)
+app.use("/api/auth/oauth", authLimiter, oauthRoutes);
+
+// 사용자
 app.use("/api/users", usersRoutes);
 
+// 서비스 라우트
 app.use("/api/customer/requests", customerRoutes);
 app.use("/api/freelancer", freelancerRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/reviews", reviewRoutes);
+app.use("/api/freelancer-reviews", freelancerReviewRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/contracts", contractRoutes);
+
+// AI 분석 (전용 rate limit)
+app.use("/api/ai", aiLimiter, aiRoutes);
+
+// 공개 & 관리자
 app.use("/api/public", publicRoutes);
 app.use("/api/admin", adminRoutes);
 
@@ -142,7 +182,6 @@ app.listen(PORT, () => {
   }
 });
 
-// 만료/폐기 refresh token 주기적 정리 (24시간마다)
 scheduleTokenCleanup();
 
 export default app;

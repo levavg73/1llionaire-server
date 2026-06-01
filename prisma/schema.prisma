@@ -90,6 +90,23 @@ enum ReviewStatus {
   reported
 }
 
+// 에스크로 상태: 결제 완료 후 대금 흐름
+enum EscrowStatus {
+  none       // 결제 전 / 불필요한 예약
+  held       // 에스크로 보관 중 (결제 완료 → 행사 전)
+  released   // 프리랜서에게 정산 완료
+  refunded   // 환불 처리 완료
+}
+
+// 계약서 상태
+enum ContractStatus {
+  draft             // 자동 생성, 서명 전
+  pending_customer  // 고객 서명 대기
+  pending_freelancer // 프리랜서 서명 대기
+  fully_signed      // 양측 서명 완료
+  voided            // 무효 (예약 취소 등)
+}
+
 // ─── 모델 ────────────────────────────────────────────────────
 
 model User {
@@ -99,34 +116,36 @@ model User {
   email         String   @unique
   password_hash String
   phone         String?
-  provider      String?
-  provider_id   String?
+  provider      String?   // "kakao" | "google" | null(이메일)
+  provider_id   String?   // OAuth provider의 고유 user id
   is_active     Boolean  @default(true)
   created_at    DateTime @default(now())
   updated_at    DateTime @updatedAt
 
-  customer_profile   CustomerProfile?
-  freelancer_profile FreelancerProfile?
-  event_requests     EventRequest[]
-  recommendations    Recommendation[]   @relation("RecommendedBy")
-  quotes             Quote[]            @relation("QuotedBy")
-  bookings_as_customer  Booking[]       @relation("CustomerBookings")
-  reviews_written    Review[]           @relation("CustomerReviews")
-  notifications       Notification[]
-  chat_rooms_as_customer ChatRoom[]       @relation("CustomerChatRooms")
-  sent_chat_messages  ChatMessage[]      @relation("SentChatMessages")
-  sent_booking_offers BookingOffer[]     @relation("SentBookingOffers")
-  received_booking_offers BookingOffer[] @relation("ReceivedBookingOffers")
-  refresh_tokens      RefreshToken[]
+  customer_profile        CustomerProfile?
+  freelancer_profile      FreelancerProfile?
+  event_requests          EventRequest[]
+  recommendations         Recommendation[]   @relation("RecommendedBy")
+  quotes                  Quote[]            @relation("QuotedBy")
+  bookings_as_customer    Booking[]          @relation("CustomerBookings")
+  reviews_written         Review[]           @relation("CustomerReviews")
+  freelancer_reviews_recv FreelancerReview[] @relation("CustomerFreelancerReviews")
+  notifications           Notification[]
+  chat_rooms_as_customer  ChatRoom[]         @relation("CustomerChatRooms")
+  sent_chat_messages      ChatMessage[]      @relation("SentChatMessages")
+  sent_booking_offers     BookingOffer[]     @relation("SentBookingOffers")
+  received_booking_offers BookingOffer[]     @relation("ReceivedBookingOffers")
+  refresh_tokens          RefreshToken[]
 
   @@index([email])
   @@index([user_type])
+  @@index([provider, provider_id])
   @@map("users")
 }
 
 model CustomerProfile {
-  id             String  @id @default(cuid())
-  user_id        String  @unique
+  id             String   @id @default(cuid())
+  user_id        String   @unique
   customer_type  String?
   company_name   String?
   department     String?
@@ -149,13 +168,13 @@ model FreelancerProfile {
   headline                 String?
   bio                      String?
   region                   String?
-  available_regions        String[] @default([])
-  categories               String[] @default([])
-  styles                   String[] @default([])
+  available_regions        String[]         @default([])
+  categories               String[]         @default([])
+  styles                   String[]         @default([])
   career_years             Int?
   base_price_min           Int?
   base_price_max           Int?
-  languages                String[] @default([])
+  languages                String[]         @default([])
   script_writing_available Boolean          @default(false)
   rehearsal_available      Boolean          @default(false)
   travel_available         Boolean          @default(false)
@@ -168,13 +187,14 @@ model FreelancerProfile {
   created_at               DateTime         @default(now())
   updated_at               DateTime         @updatedAt
 
-  user          User            @relation(fields: [user_id], references: [id], onDelete: Cascade)
-  portfolios    Portfolio[]
+  user            User              @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  portfolios      Portfolio[]
   recommendations Recommendation[]
-  quotes        Quote[]
-  bookings      Booking[]       @relation("FreelancerBookings")
-  chat_rooms    ChatRoom[]      @relation("FreelancerChatRooms")
-  reviews       Review[]        @relation("FreelancerReviews")
+  quotes          Quote[]
+  bookings        Booking[]         @relation("FreelancerBookings")
+  chat_rooms      ChatRoom[]        @relation("FreelancerChatRooms")
+  reviews         Review[]          @relation("FreelancerReviews")
+  freelancer_reviews_written FreelancerReview[] @relation("FreelancerFreelancerReviews")
 
   @@index([status])
   @@map("freelancer_profiles")
@@ -212,8 +232,8 @@ model EventRequest {
   venue                     String?
   budget_min                Int?
   budget_max                Int?
-  preferred_freelancer_type String[] @default([])
-  preferred_styles          String[] @default([])
+  preferred_freelancer_type String[]      @default([])
+  preferred_styles          String[]      @default([])
   required_language         String?
   script_required           Boolean       @default(false)
   rehearsal_required        Boolean       @default(false)
@@ -272,10 +292,10 @@ model Quote {
   created_at           DateTime    @default(now())
   updated_at           DateTime    @updatedAt
 
-  request    EventRequest      @relation(fields: [request_id], references: [id])
-  freelancer FreelancerProfile @relation(fields: [freelancer_id], references: [id])
-  quoted_by_user User          @relation("QuotedBy", fields: [quoted_by], references: [id])
-  bookings   Booking[]
+  request        EventRequest      @relation(fields: [request_id], references: [id])
+  freelancer     FreelancerProfile @relation(fields: [freelancer_id], references: [id])
+  quoted_by_user User              @relation("QuotedBy", fields: [quoted_by], references: [id])
+  bookings       Booking[]
 
   @@index([request_id])
   @@index([freelancer_id])
@@ -299,6 +319,9 @@ model Booking {
   booking_status     BookingStatus   @default(pending)
   payment_status     PaymentStatus   @default(unpaid)
   settlement_status  SettlementStatus @default(pending)
+  escrow_status      EscrowStatus    @default(none)
+  escrow_held_at     DateTime?
+  escrow_released_at DateTime?
   cancel_reason      String?
   created_at         DateTime        @default(now())
   updated_at         DateTime        @updatedAt
@@ -311,13 +334,70 @@ model Booking {
   payment    Payment?
   chat_room  ChatRoom?
   offers     BookingOffer[]
+  contract   Contract?
+  freelancer_reviews FreelancerReview[]
 
   @@index([customer_id])
   @@index([freelancer_id])
   @@index([booking_status])
   @@index([payment_status])
+  @@index([escrow_status])
   @@map("bookings")
 }
+
+// ─── 계약서 ─────────────────────────────────────────────────
+
+model Contract {
+  id                       String         @id @default(cuid())
+  booking_id               String         @unique
+  // 계약 내용을 JSON으로 저장 (당사자 정보, 행사 내용, 금액, 조건 등)
+  content_json             Json
+  status                   ContractStatus @default(draft)
+  // 고객 서명
+  customer_signed_at       DateTime?
+  customer_signature_hash  String?        // SHA256(user_id + booking_id + timestamp)
+  // 프리랜서 서명
+  freelancer_signed_at     DateTime?
+  freelancer_signature_hash String?
+  // 완전 서명 완료 시각
+  fully_signed_at          DateTime?
+  created_at               DateTime       @default(now())
+  updated_at               DateTime       @updatedAt
+
+  booking Booking @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+
+  @@index([booking_id])
+  @@map("contracts")
+}
+
+// ─── 프리랜서 → 의뢰인 리뷰 ─────────────────────────────────
+
+model FreelancerReview {
+  id                     String       @id @default(cuid())
+  booking_id             String       @unique
+  freelancer_id          String       // 리뷰 작성자 (프리랜서 프로필 ID)
+  customer_id            String       // 리뷰 대상자 (유저 ID)
+  professionalism_score  Int          // 전문성 (1-5)
+  communication_score    Int          // 소통 (1-5)
+  payment_promptness_score Int        // 결제 신속성 (1-5)
+  respect_score          Int          // 예의·존중 (1-5)
+  total_score            Float
+  would_work_again       Boolean
+  comment                String?
+  status                 ReviewStatus @default(pending)
+  created_at             DateTime     @default(now())
+  updated_at             DateTime     @updatedAt
+
+  booking    Booking           @relation(fields: [booking_id], references: [id])
+  freelancer FreelancerProfile @relation("FreelancerFreelancerReviews", fields: [freelancer_id], references: [id])
+  customer   User              @relation("CustomerFreelancerReviews", fields: [customer_id], references: [id])
+
+  @@index([freelancer_id])
+  @@index([customer_id])
+  @@map("freelancer_reviews")
+}
+
+// ─── 알림 ────────────────────────────────────────────────────
 
 model Notification {
   id         String   @id @default(cuid())
@@ -335,14 +415,16 @@ model Notification {
   @@map("notifications")
 }
 
+// ─── 채팅 ────────────────────────────────────────────────────
+
 model ChatRoom {
-  id              String   @id @default(cuid())
-  booking_id      String   @unique
+  id              String    @id @default(cuid())
+  booking_id      String    @unique
   customer_id     String
   freelancer_id   String
   last_message_at DateTime?
-  created_at      DateTime @default(now())
-  updated_at      DateTime @updatedAt
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
 
   booking    Booking           @relation(fields: [booking_id], references: [id], onDelete: Cascade)
   customer   User              @relation("CustomerChatRooms", fields: [customer_id], references: [id])
@@ -396,24 +478,26 @@ model BookingOffer {
   @@map("booking_offers")
 }
 
+// ─── 리뷰 (고객 → 프리랜서) ─────────────────────────────────
+
 model Review {
-  id                    String       @id @default(cuid())
-  booking_id            String       @unique
-  customer_id           String
-  freelancer_id         String
-  punctuality_score     Int
-  voice_delivery_score  Int
+  id                        String       @id @default(cuid())
+  booking_id                String       @unique
+  customer_id               String
+  freelancer_id             String
+  punctuality_score         Int
+  voice_delivery_score      Int
   event_understanding_score Int
-  atmosphere_score      Int
-  script_score          Int
-  response_score        Int
-  communication_score   Int
-  total_score           Float
-  rehire_intent         Boolean
-  comment               String?
-  status                ReviewStatus @default(pending)
-  created_at            DateTime     @default(now())
-  updated_at            DateTime     @updatedAt
+  atmosphere_score          Int
+  script_score              Int
+  response_score            Int
+  communication_score       Int
+  total_score               Float
+  rehire_intent             Boolean
+  comment                   String?
+  status                    ReviewStatus @default(pending)
+  created_at                DateTime     @default(now())
+  updated_at                DateTime     @updatedAt
 
   booking    Booking           @relation(fields: [booking_id], references: [id])
   customer   User              @relation("CustomerReviews", fields: [customer_id], references: [id])
@@ -423,6 +507,9 @@ model Review {
   @@index([status])
   @@map("reviews")
 }
+
+// ─── 인증 ────────────────────────────────────────────────────
+
 model RefreshToken {
   id         String    @id @default(cuid())
   user_id    String
@@ -438,12 +525,13 @@ model RefreshToken {
   @@map("refresh_tokens")
 }
 
+// ─── 결제 ────────────────────────────────────────────────────
 
 model Payment {
-  id              String        @id @default(cuid())
-  booking_id      String        @unique
-  order_id        String        @unique
-  payment_key     String?       @unique
+  id              String            @id @default(cuid())
+  booking_id      String            @unique
+  order_id        String            @unique
+  payment_key     String?           @unique
   amount          Int
   method          String?
   status          PaymentStatusToss @default(READY)
@@ -452,8 +540,8 @@ model Payment {
   failure_code    String?
   failure_message String?
   raw_response    Json?
-  created_at      DateTime      @default(now())
-  updated_at      DateTime      @updatedAt
+  created_at      DateTime          @default(now())
+  updated_at      DateTime          @updatedAt
 
   booking Booking @relation(fields: [booking_id], references: [id])
 
