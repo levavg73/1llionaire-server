@@ -1,8 +1,9 @@
 /**
  * AI 단가 분석 라우터 (Claude claude-sonnet-4-20250514)
  *
- * - POST /api/ai/pricing-analysis     — 단가 분석 리포트 생성
+ * - POST /api/ai/pricing-analysis     — 단위 항목별 단가 분석 리포트 생성
  * - POST /api/ai/apply-recommendation — 관리자: AI 추천 단가를 예약에 반영
+ * - PATCH /api/customer/requests/:id/apply-ai-budget — 고객 요청서 예산 반영
  *
  * SRP: AI 연동 로직만 담당
  * DIP: requireAnthropicKey()로 키 검증 분리
@@ -25,19 +26,28 @@ router.use(authenticate);
 
 // ─── 타입 ────────────────────────────────────────────────────
 
-interface PricingAnalysis {
+export interface LineItem {
+  name: string;
+  description: string;
+  estimated_price: number;
+  reason: string;
+}
+
+export type Confidence = "high" | "medium" | "low";
+
+export interface PricingAnalysisResult {
+  event_summary: string;
+  line_items: LineItem[];
   recommended_min: number;
   recommended_max: number;
   recommended_center: number;
-  confidence: "high" | "medium" | "low";
-  rationale: string;
-  market_context: string;
-  factors: string[];
-  risk_notes: string[];
+  confidence: Confidence;
+  assumptions: string[];
+  caution_notes: string[];
   generated_at: string;
 }
 
-// ─── Claude API 호출 헬퍼 ─────────────────────────────────────
+// ─── Claude API 헬퍼 ─────────────────────────────────────────
 
 async function callClaude(prompt: string, systemPrompt: string): Promise<string> {
   const apiKey = requireAnthropicKey();
@@ -48,7 +58,7 @@ async function callClaude(prompt: string, systemPrompt: string): Promise<string>
     "https://api.anthropic.com/v1/messages",
     {
       model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
+      max_tokens: 1500,
       system: systemPrompt,
       messages: [{ role: "user", content: prompt }],
     },
@@ -66,11 +76,10 @@ async function callClaude(prompt: string, systemPrompt: string): Promise<string>
   return textBlock?.text ?? "";
 }
 
-function parsePricingJson(raw: string): PricingAnalysis {
-  // JSON 블록 추출 (```json ... ``` 또는 순수 JSON)
+function parsePricingJson(raw: string): PricingAnalysisResult {
   const jsonMatch = raw.match(/```json\s*([\s\S]*?)```/) ?? raw.match(/({[\s\S]*})/);
   const jsonStr = jsonMatch ? jsonMatch[1] : raw;
-  return JSON.parse(jsonStr.trim()) as PricingAnalysis;
+  return JSON.parse(jsonStr.trim()) as PricingAnalysisResult;
 }
 
 // ─── POST /api/ai/pricing-analysis ───────────────────────────
@@ -80,11 +89,10 @@ const pricingSchema = z.object({
   region: z.string().min(1).max(100),
   categories: z.array(z.string()).min(1).max(10),
   career_years_min: z.number().int().min(0).optional(),
-  career_years_max: z.number().int().min(0).optional(),
   budget_min: z.number().int().min(0).optional(),
   budget_max: z.number().int().min(0).optional(),
   duration_hours: z.number().min(0.5).max(24).optional(),
-  request_id: z.string().optional(), // 특정 요청서와 연계 시
+  request_id: z.string().optional(),
 });
 
 router.post(
@@ -94,18 +102,12 @@ router.post(
     try {
       const body = pricingSchema.parse(req.body);
 
-      // 유사 프리랜서 통계 (DB에서 실제 데이터 기반)
       const stats = await prisma.freelancerProfile.aggregate({
         where: {
           status: "approved",
           categories: { hasSome: body.categories },
           ...(body.region && body.region !== "전국"
-            ? {
-                OR: [
-                  { region: body.region },
-                  { available_regions: { has: body.region } },
-                ],
-              }
+            ? { OR: [{ region: body.region }, { available_regions: { has: body.region } }] }
             : {}),
           ...(body.career_years_min !== undefined
             ? { career_years: { gte: body.career_years_min } }
@@ -127,38 +129,55 @@ router.post(
       };
 
       const systemPrompt = `당신은 한국 행사 진행자(MC/아나운서/쇼호스트) 시장 전문 단가 분석가입니다.
-제공된 시장 데이터와 요청 조건을 바탕으로 적정 단가를 분석합니다.
+제공된 시장 데이터와 요청 조건을 바탕으로 단위 항목별 적정 단가를 분석합니다.
+
 반드시 아래 JSON 형식으로만 응답하세요:
 {
-  "recommended_min": <최소 추천 금액 (원, 정수)>,
-  "recommended_max": <최대 추천 금액 (원, 정수)>,
-  "recommended_center": <중심 추천 금액 (원, 정수)>,
+  "event_summary": "<행사 조건 요약, 100자 이내>",
+  "line_items": [
+    {
+      "name": "<항목명, 예: 사전 미팅>",
+      "description": "<항목 설명, 50자 이내>",
+      "estimated_price": <예상 금액 (원, 정수)>,
+      "reason": "<산정 근거, 80자 이내>"
+    }
+  ],
+  "recommended_min": <최소 추천 총액 (원, 정수)>,
+  "recommended_max": <최대 추천 총액 (원, 정수)>,
+  "recommended_center": <중심 추천 총액 (원, 정수)>,
   "confidence": "<high|medium|low>",
-  "rationale": "<150자 이내 한국어 핵심 근거>",
-  "market_context": "<100자 이내 시장 현황>",
-  "factors": ["<가격 영향 요인 1>", "<요인 2>", "<요인 3>"],
-  "risk_notes": ["<주의사항 1>", "<주의사항 2>"],
+  "assumptions": ["<가정 1>", "<가정 2>"],
+  "caution_notes": ["<주의사항 1>", "<주의사항 2>"],
   "generated_at": "<ISO 8601 현재 시각>"
-}`;
+}
+
+프리마이크 기준 단위 항목 예시 (해당 조건에 맞게 선택):
+- 사전 미팅 (20~50만원)
+- 대본 검토/작성 (20~80만원)
+- 리허설 참석 (10~50만원)
+- 본행사 진행 (행사 핵심 비용)
+- 출장/이동비 (지역별 차등)
+- 외국어 진행 추가 (영어 +30%, 기타 +20%)
+- 라이브커머스 상품 사전 숙지 (10~30만원)
+- 현장 변수 대응 (기본 포함 또는 별도)`;
 
       const prompt = `
 ## 행사 조건
 - 행사 유형: ${body.event_type}
 - 지역: ${body.region}
 - 분야: ${body.categories.join(", ")}
-- 경력: ${body.career_years_min ?? 0}년 ~ ${body.career_years_max ?? "제한없음"}년
-- 예산 범위: ${body.budget_min ? `${body.budget_min.toLocaleString("ko-KR")}원` : "미설정"} ~ ${body.budget_max ? `${body.budget_max.toLocaleString("ko-KR")}원` : "미설정"}
+- 최소 경력: ${body.career_years_min ?? 0}년 이상
+- 고객 예산: ${body.budget_min ? `${body.budget_min.toLocaleString("ko-KR")}원` : "미설정"} ~ ${body.budget_max ? `${body.budget_max.toLocaleString("ko-KR")}원` : "미설정"}
 - 진행 시간: ${body.duration_hours ?? "미정"}시간
 
-## 플랫폼 실제 시장 데이터
-- 유사 프리랜서 수: ${marketData.sample_count}명
+## 플랫폼 시장 데이터 (${marketData.sample_count}명 기준)
 - 평균 최소 단가: ${marketData.avg_price_min.toLocaleString("ko-KR")}원
 - 평균 최대 단가: ${marketData.avg_price_max.toLocaleString("ko-KR")}원
 - 시장 최저가: ${marketData.market_min.toLocaleString("ko-KR")}원
 - 시장 최고가: ${marketData.market_max.toLocaleString("ko-KR")}원
 - 평균 평점: ${marketData.avg_rating}점
 
-위 조건과 데이터를 바탕으로 적정 단가를 분석해 주세요.`;
+위 조건으로 단위 항목별 단가를 분석해 주세요. line_items는 해당 행사에 필요한 항목만 포함하세요.`;
 
       const rawResponse = await callClaude(prompt, systemPrompt);
       const analysis = parsePricingJson(rawResponse);
@@ -181,12 +200,8 @@ router.post(
         }
       }
 
-      return successResponse(res, {
-        analysis,
-        market_data: marketData,
-      });
+      return successResponse(res, { analysis, market_data: marketData });
     } catch (err) {
-      // Anthropic API 에러 구분
       if (axios.isAxiosError(err) && err.config?.url?.includes("anthropic")) {
         return errorResponse(
           res,
@@ -202,11 +217,11 @@ router.post(
 );
 
 // ─── POST /api/ai/apply-recommendation ───────────────────────
-// 관리자: AI 추천 단가를 특정 예약의 final_price에 반영
+// 관리자: AI 추천 단가를 예약 금액에 반영
 
 const applySchema = z.object({
   booking_id: z.string().min(1),
-  recommended_price: z.number().int().positive("추천 단가를 입력해 주세요."),
+  recommended_price: z.number().int().positive(),
 });
 
 router.post(
@@ -221,7 +236,6 @@ router.post(
         select: {
           id: true,
           booking_status: true,
-          final_price: true,
           event_title: true,
           customer_id: true,
           freelancer: { select: { user_id: true } },
@@ -232,15 +246,8 @@ router.post(
         return errorResponse(res, "NOT_FOUND", "예약을 찾을 수 없습니다.", [], 404);
       }
 
-      // 결제 완료 후에는 변경 불가
       if (["completed", "canceled", "disputed"].includes(booking.booking_status)) {
-        return errorResponse(
-          res,
-          "CONFLICT",
-          "이미 완료/취소된 예약은 단가를 변경할 수 없습니다.",
-          [],
-          409
-        );
+        return errorResponse(res, "CONFLICT", "이미 완료/취소된 예약은 단가를 변경할 수 없습니다.", [], 409);
       }
 
       const PLATFORM_FEE_RATE = 0.1;
@@ -249,14 +256,9 @@ router.post(
 
       const updated = await prisma.booking.update({
         where: { id: booking_id },
-        data: {
-          final_price: recommended_price,
-          platform_fee: platformFee,
-          freelancer_amount: freelancerAmount,
-        },
+        data: { final_price: recommended_price, platform_fee: platformFee, freelancer_amount: freelancerAmount },
       });
 
-      // 양측에 단가 변경 안내
       await Promise.all([
         createNotification(prisma, {
           user_id: booking.customer_id,
@@ -275,6 +277,50 @@ router.post(
       ]);
 
       return successResponse(res, updated, "AI 추천 단가가 반영되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ─── PATCH /api/ai/requests/:id/apply-budget ─────────────────
+// 고객: AI 분석 결과를 요청서 예산에 반영
+
+const applyBudgetSchema = z.object({
+  budget_min: z.number().int().min(0),
+  budget_max: z.number().int().min(0),
+});
+
+router.patch(
+  "/requests/:id/apply-budget",
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const { userId, userType } = req.user!;
+      const body = applyBudgetSchema.parse(req.body);
+
+      const request = await prisma.eventRequest.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, customer_id: true, event_title: true, status: true },
+      });
+
+      if (!request) {
+        return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
+      }
+
+      if (userType === "customer" && request.customer_id !== userId) {
+        return errorResponse(res, "FORBIDDEN", "본인 요청서만 수정할 수 있습니다.", [], 403);
+      }
+
+      if (["booked", "completed", "canceled"].includes(request.status)) {
+        return errorResponse(res, "CONFLICT", "현재 상태에서는 예산을 수정할 수 없습니다.", [], 409);
+      }
+
+      const updated = await prisma.eventRequest.update({
+        where: { id: req.params.id },
+        data: { budget_min: body.budget_min, budget_max: body.budget_max },
+      });
+
+      return successResponse(res, updated, "예산이 AI 분석 결과로 업데이트되었습니다.");
     } catch (err) {
       next(err);
     }

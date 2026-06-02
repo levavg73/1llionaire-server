@@ -62,6 +62,7 @@ enum BookingStatus {
   rejected
   payment_pending
   confirmed
+  completion_requested
   completed
   canceled
   disputed
@@ -136,6 +137,7 @@ model User {
   sent_booking_offers     BookingOffer[]     @relation("SentBookingOffers")
   received_booking_offers BookingOffer[]     @relation("ReceivedBookingOffers")
   refresh_tokens          RefreshToken[]
+  saved_freelancers       SavedFreelancer[]  @relation("CustomerSavedFreelancers")
 
   @@index([email])
   @@index([user_type])
@@ -195,6 +197,7 @@ model FreelancerProfile {
   chat_rooms      ChatRoom[]        @relation("FreelancerChatRooms")
   reviews         Review[]          @relation("FreelancerReviews")
   freelancer_reviews_written FreelancerReview[] @relation("FreelancerFreelancerReviews")
+  saved_by               SavedFreelancer[]  @relation("SavedByCustomers")
 
   @@index([status])
   @@map("freelancer_profiles")
@@ -320,8 +323,9 @@ model Booking {
   payment_status     PaymentStatus   @default(unpaid)
   settlement_status  SettlementStatus @default(pending)
   escrow_status      EscrowStatus    @default(none)
-  escrow_held_at     DateTime?
-  escrow_released_at DateTime?
+  escrow_held_at              DateTime?
+  escrow_released_at          DateTime?
+  completion_requested_at     DateTime?
   cancel_reason      String?
   created_at         DateTime        @default(now())
   updated_at         DateTime        @updatedAt
@@ -559,4 +563,18 @@ enum PaymentStatusToss {
   PARTIAL_CANCELED
   ABORTED
   EXPIRED
+}
+
+model SavedFreelancer {
+  id            String   @id @default(cuid())
+  customer_id   String
+  freelancer_id String
+  created_at    DateTime @default(now())
+
+  customer   User              @relation("CustomerSavedFreelancers", fields: [customer_id], references: [id], onDelete: Cascade)
+  freelancer FreelancerProfile @relation("SavedByCustomers", fields: [freelancer_id], references: [id], onDelete: Cascade)
+
+  @@unique([customer_id, freelancer_id])
+  @@index([customer_id])
+  @@map("saved_freelancers")
 }

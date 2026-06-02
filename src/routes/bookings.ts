@@ -1,5 +1,5 @@
 import { Router, Response, NextFunction } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma, BookingStatus } from "@prisma/client";
 import { z } from "zod";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
@@ -232,6 +232,82 @@ router.post(
           where: { id: recommendation.id },
           data: { status: "consultation_requested" },
         });
+
+        // 미선택 후보 자동 거절 (같은 요청서의 다른 추천 후보들)
+        const otherRecs = await tx.recommendation.findMany({
+          where: {
+            request_id: request.id,
+            id: { not: recommendation.id },
+            status: { in: ["draft", "sent", "viewed"] },
+          },
+          include: { freelancer: { select: { user_id: true } } },
+        });
+
+        if (otherRecs.length > 0) {
+          await tx.recommendation.updateMany({
+            where: {
+              request_id: request.id,
+              id: { not: recommendation.id },
+              status: { in: ["draft", "sent", "viewed"] },
+            },
+            data: { status: "rejected" },
+          });
+
+          // 자동 거절 알림 발송
+          await Promise.all(
+            otherRecs.map((rec) =>
+              createNotification(tx, {
+                user_id: rec.freelancer.user_id,
+                type: "recommendation_auto_rejected",
+                title: "후보 미선택 안내",
+                message: `"${request.event_title}" 요청서에서 다른 진행자가 선택되어 자동으로 거절 처리되었습니다.`,
+                link_url: "/freelancer/requests",
+              })
+            )
+          );
+        }
+
+        // 계약서 자동 생성 (금액 확정 직후, 결제 전)
+        const customer = await tx.user.findUnique({
+          where: { id: request.customer_id },
+          select: { name: true, email: true },
+        });
+
+        if (customer) {
+          const contractContent = {
+            version: "1.0",
+            generated_at: new Date().toISOString(),
+            event_title: request.event_title,
+            event_date: request.event_date.toISOString().split("T")[0],
+            start_time: request.start_time,
+            end_time: request.end_time,
+            venue: request.venue ?? null,
+            customer_name: customer.name,
+            customer_email: customer.email,
+            freelancer_name: freelancer.display_name ?? "진행자",
+            freelancer_display_name: freelancer.display_name ?? "진행자",
+            final_price: amounts.finalPrice,
+            platform_fee: amounts.platformFee,
+            freelancer_amount: amounts.freelancerAmount,
+            script_included: quote?.script_included ?? false,
+            rehearsal_included: quote?.rehearsal_included ?? false,
+            travel_included: quote?.travel_fee_included ?? false,
+            terms: [
+              "진행자는 행사 시작 1시간 전까지 현장에 도착해야 합니다.",
+              "천재지변, 불가항력으로 인한 행사 취소 시 위약금은 상호 협의합니다.",
+              "결제 금액은 에스크로로 보관되며, 행사 완료 후 7일 이내 진행자에게 정산됩니다.",
+              "분쟁 발생 시 프리마이크 운영팀의 중재를 먼저 요청합니다.",
+            ],
+          };
+
+          await tx.contract.create({
+            data: {
+              booking_id: created.id,
+              content_json: contractContent as unknown as Prisma.InputJsonValue,
+              status: "pending_customer",
+            },
+          });
+        }
 
         await createNotification(tx, {
           user_id: freelancer.user_id,
@@ -666,6 +742,58 @@ router.patch(
       });
 
       return successResponse(res, updated, "예약이 취소되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+
+// PATCH /api/bookings/:id/request-completion — 프리랜서 행사 완료 요청
+router.patch(
+  "/:id/request-completion",
+  authenticate,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      if (req.user!.userType !== "freelancer") {
+        return errorResponse(res, "FORBIDDEN", "프리랜서만 완료 요청할 수 있습니다.", [], 403);
+      }
+
+      const booking = await getBookingForUser(req.params.id, req.user!);
+      if (!booking) {
+        return errorResponse(res, "NOT_FOUND", "예약을 찾을 수 없습니다.", [], 404);
+      }
+
+      if (booking.freelancer.user_id !== req.user!.userId) {
+        return errorResponse(res, "FORBIDDEN", "접근 권한이 없습니다.", [], 403);
+      }
+
+      if (booking.payment_status !== "fully_paid") {
+        return errorResponse(res, "CONFLICT", "결제 완료 후 완료 요청할 수 있습니다.", [], 409);
+      }
+
+      if (booking.booking_status !== "confirmed") {
+        return errorResponse(res, "CONFLICT", "예약 확정 상태에서만 완료 요청할 수 있습니다.", [], 409);
+      }
+
+      const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const result = await tx.booking.update({
+          where: { id: req.params.id },
+          data: { booking_status: "completion_requested" as BookingStatus },
+        });
+
+        await createNotification(tx, {
+          user_id: booking.customer_id,
+          type: "completion_requested",
+          title: "행사 완료 확인 요청",
+          message: `"${booking.event_title}" 행사가 완료되었습니다. 완료를 확인해 주세요.`,
+          link_url: `/customer/bookings`,
+        });
+
+        return result;
+      });
+
+      return successResponse(res, updated, "행사 완료 요청이 전달되었습니다. 고객이 확인하면 정산이 진행됩니다.");
     } catch (err) {
       next(err);
     }
