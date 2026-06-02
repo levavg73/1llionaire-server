@@ -20,6 +20,7 @@ const router = Router();
 const BOOKING_PLATFORM_FEE_RATE = 0.1;
 const BLOCKED_BOOKING_REQUEST_STATUSES = ["booked", "completed", "reviewed", "canceled", "disputed"];
 const CLOSED_BOOKING_STATUSES = ["rejected", "completed", "canceled", "disputed"];
+const BOOKING_STATUS_COMPLETION_REQUESTED = "completion_requested" as unknown as BookingStatus;
 
 const createBookingSchema = z.object({
   request_id: z.string().min(1, "요청서를 선택해 주세요."),
@@ -779,7 +780,7 @@ router.patch(
       const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const result = await tx.booking.update({
           where: { id: req.params.id },
-          data: { booking_status: BookingStatus.completion_requested },
+          data: { booking_status: BOOKING_STATUS_COMPLETION_REQUESTED },
         });
 
         await createNotification(tx, {
@@ -816,7 +817,10 @@ router.patch(
         return errorResponse(res, "NOT_FOUND", "예약을 찾을 수 없습니다.", [], 404);
       }
 
-      if (![BookingStatus.confirmed, BookingStatus.completion_requested].includes(booking.booking_status)) {
+      if (
+        booking.booking_status !== BookingStatus.confirmed &&
+        String(booking.booking_status) !== "completion_requested"
+      ) {
         return errorResponse(res, "CONFLICT", "예약 확정 또는 완료 요청 상태에서만 행사 완료를 확인할 수 있습니다.", [], 409);
       }
 
