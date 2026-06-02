@@ -1,7 +1,7 @@
 /**
  * 알림 생성 유틸리티
  *
- * - createNotification: DB 저장 + SSE 실시간 푸시
+ * - createNotification: DB 저장
  * - 5종 필수 알림 헬퍼 함수 제공
  *
  * SRP: 알림 생성 로직만 담당
@@ -9,7 +9,6 @@
  */
 
 import { Prisma, PrismaClient } from "@prisma/client";
-import { pushNotificationToUser } from "../routes/notifications";
 import { NotificationType } from "./notificationTypes";
 
 type PrismaWriter = PrismaClient | Prisma.TransactionClient;
@@ -23,7 +22,10 @@ export type NotificationInput = {
 };
 
 /**
- * 알림 생성: DB 저장 후 SSE 실시간 푸시
+ * 알림 생성: DB 저장
+ *
+ * Vercel serverless 환경에서는 장기 SSE 연결을 유지하지 않습니다.
+ * 프론트엔드는 unread-count/list API를 polling하여 DB 기반 인앱 알림을 표시합니다.
  */
 export async function createNotification(
   prismaClient: PrismaWriter,
@@ -39,8 +41,6 @@ export async function createNotification(
     },
   });
 
-  // SSE 실시간 푸시 (fire-and-forget, 연결 없으면 무시)
-  pushNotificationToUser(input.user_id, created);
 
   return created;
 }
