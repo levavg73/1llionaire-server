@@ -39,6 +39,18 @@ interface OAuthUserInfo {
   name: string;
 }
 
+interface OAuthDbUser {
+  id: string;
+  user_type: string;
+  email: string;
+  name: string;
+}
+
+interface OAuthUpsertResult {
+  user: OAuthDbUser;
+  isNew: boolean;
+}
+
 interface OAuthStatePayload {
   provider: OAuthProvider;
   userType: OAuthUserType;
@@ -303,28 +315,29 @@ async function upsertOAuthUser(
   provider: OAuthProvider,
   info: OAuthUserInfo,
   userType: OAuthUserType
-): Promise<{ id: string; user_type: string; email: string }> {
+): Promise<OAuthUpsertResult> {
   // 1. 같은 provider + providerId 찾기
-  let user = await prisma.user.findFirst({
+  const user = await prisma.user.findFirst({
     where: { provider, provider_id: info.providerId },
-    select: { id: true, user_type: true, email: true },
+    select: { id: true, user_type: true, email: true, name: true },
   });
 
-  if (user) return user;
+  if (user) return { user, isNew: false };
 
   // 2. 이메일이 있는 경우에만 기존 이메일 계정과 연결
   if (info.email) {
     const existingByEmail = await prisma.user.findUnique({
       where: { email: info.email },
-      select: { id: true, user_type: true, email: true },
+      select: { id: true, user_type: true, email: true, name: true },
     });
 
     if (existingByEmail) {
-      await prisma.user.update({
+      const linkedUser = await prisma.user.update({
         where: { id: existingByEmail.id },
         data: { provider, provider_id: info.providerId },
+        select: { id: true, user_type: true, email: true, name: true },
       });
-      return existingByEmail;
+      return { user: linkedUser, isNew: false };
     }
   }
 
@@ -344,7 +357,7 @@ async function upsertOAuthUser(
         ? { customer_profile: { create: {} } }
         : { freelancer_profile: { create: {} } }),
     },
-    select: { id: true, user_type: true, email: true },
+    select: { id: true, user_type: true, email: true, name: true },
   });
 
   return { user: newUser, isNew: true };
@@ -466,7 +479,8 @@ router.get(
           ? await exchangeKakaoCode(code)
           : await exchangeGoogleCode(code);
 
-      const user = await upsertOAuthUser(provider, info, payload.userType);
+      const result = await upsertOAuthUser(provider, info, payload.userType);
+      const { user } = result;
 
       // 쿠키 발급 (기존 이메일 로그인과 동일)
       await setAuthCookies(res, {
