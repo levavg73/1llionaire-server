@@ -30,6 +30,24 @@ const freelancerListQuerySchema = z
 
 type FreelancerListSort = z.infer<typeof freelancerListQuerySchema>["sort"];
 
+const CATEGORY_ALIASES: Record<string, string[]> = {
+  "기업행사 MC": ["기업행사 MC", "기업행사"],
+  "기업행사MC": ["기업행사 MC", "기업행사"],
+  "웨딩 사회자": ["웨딩 사회자", "웨딩", "사회자"],
+  "쇼호스트": ["쇼호스트"],
+  "컨퍼런스 MC": ["컨퍼런스 MC", "컨퍼런스"],
+  "컨퍼런스 mc": ["컨퍼런스 MC", "컨퍼런스"],
+  "라이브커머스": ["라이브커머스"],
+  "아나운서": ["아나운서"],
+};
+
+function getCategoryWhere(category?: string): Prisma.FreelancerProfileWhereInput {
+  if (!category || category === "all" || category === "전체") return {};
+
+  const aliases = CATEGORY_ALIASES[category] ?? [category];
+  return { categories: { hasSome: aliases } };
+}
+
 function getFreelancerOrderBy(sort: FreelancerListSort): Prisma.FreelancerProfileOrderByWithRelationInput[] {
   if (sort === "latest") {
     return [{ approved_at: "desc" }, { created_at: "desc" }];
@@ -51,9 +69,9 @@ router.get(
       const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>);
       const { category, region, language, min_price, max_price, q, sort } = freelancerListQuerySchema.parse(req.query);
 
-      const where: Record<string, unknown> = {
+      const where: Prisma.FreelancerProfileWhereInput = {
         status: "approved",
-        ...(category && { categories: { has: String(category) } }),
+        ...getCategoryWhere(category),
         ...(region && { region: String(region) }),
         ...(language && { languages: { has: String(language) } }),
         ...(min_price !== undefined && { base_price_max: { gte: min_price } }),
