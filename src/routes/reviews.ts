@@ -63,7 +63,8 @@ router.post(
         body.response_score,
         body.communication_score,
       ];
-      const total_score = Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(2));
+      // 7개 항목 평균, 소수점 1자리 반올림
+      const total_score = Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length * 10) / 10;
 
       const review = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const newReview = await tx.review.create({

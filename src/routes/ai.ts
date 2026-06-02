@@ -327,4 +327,80 @@ router.patch(
   }
 );
 
+// ─── POST /api/ai/recommendation-reason ──────────────────────
+// 관리자: 특정 프리랜서와 요청서 조합의 추천 사유를 AI로 자동 생성
+
+const recReasonSchema = z.object({
+  request_id: z.string().min(1),
+  freelancer_id: z.string().min(1),
+});
+
+router.post(
+  "/recommendation-reason",
+  requireAdmin,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const { request_id, freelancer_id } = recReasonSchema.parse(req.body);
+
+      const [request, freelancer] = await Promise.all([
+        prisma.eventRequest.findUnique({
+          where: { id: request_id },
+          select: {
+            event_title: true, event_type: true, region: true,
+            budget_min: true, budget_max: true,
+            preferred_freelancer_type: true, preferred_styles: true,
+          },
+        }),
+        prisma.freelancerProfile.findUnique({
+          where: { id: freelancer_id },
+          select: {
+            display_name: true, categories: true, styles: true,
+            career_years: true, region: true, avg_rating: true,
+            review_count: true, base_price_min: true, base_price_max: true,
+            headline: true,
+          },
+        }),
+      ]);
+
+      if (!request || !freelancer) {
+        return errorResponse(res, "NOT_FOUND", "요청서 또는 프리랜서를 찾을 수 없습니다.", [], 404);
+      }
+
+      const systemPrompt = `당신은 행사 진행자 매칭 전문가입니다. 
+고객 요청서와 진행자 프로필을 비교하여 구체적이고 설득력 있는 추천 사유를 2~3문장으로 작성합니다.
+단순히 "조건에 맞다"가 아니라, 구체적인 수치(경력 연수, 평점, 카테고리 일치도)와 강점을 언급해야 합니다.
+한국어로 작성하고, JSON 없이 텍스트만 반환합니다.`;
+
+      const prompt = `
+## 고객 요청서
+- 행사명: ${request.event_title}
+- 행사 유형: ${request.event_type}
+- 지역: ${request.region}
+- 예산: ${request.budget_min?.toLocaleString("ko-KR") ?? "미설정"}원 ~ ${request.budget_max?.toLocaleString("ko-KR") ?? "미설정"}원
+- 희망 유형: ${request.preferred_freelancer_type.join(", ") || "제한 없음"}
+- 희망 스타일: ${request.preferred_styles.join(", ") || "제한 없음"}
+
+## 진행자 프로필
+- 이름: ${freelancer.display_name}
+- 분야: ${freelancer.categories.join(", ")}
+- 스타일: ${freelancer.styles.join(", ")}
+- 경력: ${freelancer.career_years ?? "미정"}년
+- 지역: ${freelancer.region}
+- 평점: ${freelancer.avg_rating?.toFixed(1) ?? "없음"}점 (${freelancer.review_count}개 후기)
+- 단가: ${freelancer.base_price_min?.toLocaleString("ko-KR") ?? ""}원 ~ ${freelancer.base_price_max?.toLocaleString("ko-KR") ?? ""}원
+
+이 진행자를 이 요청서에 추천하는 구체적인 사유를 2~3문장으로 작성해 주세요.`;
+
+      const reason = await callClaude(prompt, systemPrompt);
+
+      return successResponse(res, { reason: reason.trim() });
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.config?.url?.includes("anthropic")) {
+        return errorResponse(res, "SERVER_ERROR", "AI 서비스 오류가 발생했습니다.", [], 503);
+      }
+      next(err);
+    }
+  }
+);
+
 export default router;

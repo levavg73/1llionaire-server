@@ -298,4 +298,55 @@ router.patch(
   }
 );
 
+// ── PATCH /api/users/me/set-password — 소셜 로그인 사용자 비밀번호 최초 설정 ──
+// 기존 비밀번호가 없는 경우(password_hash === "")에만 허용
+
+const setPasswordSchema = z.object({
+  new_password: z
+    .string()
+    .min(8, "비밀번호는 8자 이상이어야 합니다.")
+    .regex(/[A-Z]/, "대문자를 포함해야 합니다.")
+    .regex(/[0-9]/, "숫자를 포함해야 합니다."),
+});
+
+router.patch(
+  "/me/set-password",
+  authenticate,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const { new_password } = setPasswordSchema.parse(req.body);
+
+      const user = await prisma.user.findUnique({
+        where: { id: req.user!.userId },
+        select: { id: true, password_hash: true },
+      });
+
+      if (!user) {
+        return errorResponse(res, "NOT_FOUND", "사용자를 찾을 수 없습니다.", [], 404);
+      }
+
+      // 이미 비밀번호가 설정된 경우 이 엔드포인트 사용 불가 → 비밀번호 변경 API 사용
+      if (user.password_hash && user.password_hash !== "") {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "이미 비밀번호가 설정된 계정입니다. 비밀번호 변경을 이용해 주세요.",
+          [],
+          409
+        );
+      }
+
+      const hash = await bcrypt.hash(new_password, 12);
+      await prisma.user.update({
+        where: { id: req.user!.userId },
+        data: { password_hash: hash },
+      });
+
+      return successResponse(res, null, "비밀번호가 설정되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 export default router;
