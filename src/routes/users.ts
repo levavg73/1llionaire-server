@@ -1,5 +1,6 @@
 import { Router, Response, NextFunction } from "express";
 import bcrypt from "bcryptjs";
+import { BookingStatus as PrismaBookingStatus } from "@prisma/client";
 import { z } from "zod";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
@@ -9,6 +10,15 @@ import { clearAuthCookies } from "../utils/authTokens";
 import { attachSignedProfileImageUrl } from "../utils/profileImages";
 
 const router = Router();
+
+const ACTIVE_BOOKING_STATUSES: PrismaBookingStatus[] = [
+  PrismaBookingStatus.pending,
+  PrismaBookingStatus.negotiating,
+  PrismaBookingStatus.accepted,
+  PrismaBookingStatus.payment_pending,
+  PrismaBookingStatus.confirmed,
+  PrismaBookingStatus.completion_requested,
+];
 
 const updateMeSchema = z.object({
   name: z.string().min(1, "이름을 입력해 주세요.").max(50).optional(),
@@ -206,7 +216,7 @@ router.delete(
               freelancer: { user_id: user.id },
             },
           ],
-          booking_status: { in: ["pending", "negotiating", "accepted", "payment_pending", "confirmed"] },
+          booking_status: { in: ACTIVE_BOOKING_STATUSES },
         },
       });
 

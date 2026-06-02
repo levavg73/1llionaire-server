@@ -772,14 +772,14 @@ router.patch(
         return errorResponse(res, "CONFLICT", "결제 완료 후 완료 요청할 수 있습니다.", [], 409);
       }
 
-      if (booking.booking_status !== "confirmed") {
+      if (booking.booking_status !== BookingStatus.confirmed) {
         return errorResponse(res, "CONFLICT", "예약 확정 상태에서만 완료 요청할 수 있습니다.", [], 409);
       }
 
       const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const result = await tx.booking.update({
           where: { id: req.params.id },
-          data: { booking_status: "completion_requested" as BookingStatus },
+          data: { booking_status: BookingStatus.completion_requested },
         });
 
         await createNotification(tx, {
@@ -816,8 +816,8 @@ router.patch(
         return errorResponse(res, "NOT_FOUND", "예약을 찾을 수 없습니다.", [], 404);
       }
 
-      if (booking.booking_status !== "confirmed") {
-        return errorResponse(res, "CONFLICT", "예약 확정 상태에서만 행사 완료를 확인할 수 있습니다.", [], 409);
+      if (![BookingStatus.confirmed, BookingStatus.completion_requested].includes(booking.booking_status)) {
+        return errorResponse(res, "CONFLICT", "예약 확정 또는 완료 요청 상태에서만 행사 완료를 확인할 수 있습니다.", [], 409);
       }
 
       if (booking.payment_status !== "fully_paid") {
@@ -827,7 +827,7 @@ router.patch(
       const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const completed = await tx.booking.update({
           where: { id: req.params.id },
-          data: { booking_status: "completed" },
+          data: { booking_status: BookingStatus.completed },
         });
 
         await notifyReviewRequested(tx, {
@@ -873,7 +873,7 @@ router.patch(
       const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const completed = await tx.booking.update({
           where: { id: req.params.id },
-          data: { booking_status: "completed" },
+          data: { booking_status: BookingStatus.completed },
         });
 
         if (booking.request && canTransitionRequest(booking.request.status, "completed")) {

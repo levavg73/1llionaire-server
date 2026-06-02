@@ -1,5 +1,5 @@
 import { Router, Response, NextFunction } from "express";
-import { Prisma } from "@prisma/client";
+import { Prisma, BookingStatus as PrismaBookingStatus, PaymentStatus as PrismaPaymentStatus, SettlementStatus as PrismaSettlementStatus } from "@prisma/client";
 import { z } from "zod";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
@@ -38,16 +38,16 @@ const requestStatusQuerySchema = z.object({
 });
 
 const bookingListQuerySchema = z.object({
-  booking_status: z.enum(["pending", "negotiating", "accepted", "rejected", "payment_pending", "confirmed", "completed", "canceled", "disputed"]).optional(),
-  payment_status: z.enum(["unpaid", "deposit_paid", "fully_paid", "refunded", "failed"]).optional(),
+  booking_status: z.nativeEnum(PrismaBookingStatus).optional(),
+  payment_status: z.nativeEnum(PrismaPaymentStatus).optional(),
 });
 
 const paymentStatusQuerySchema = z.object({
-  payment_status: z.enum(["unpaid", "deposit_paid", "fully_paid", "refunded", "failed"]).optional(),
+  payment_status: z.nativeEnum(PrismaPaymentStatus).optional(),
 });
 
 const settlementStatusQuerySchema = z.object({
-  settlement_status: z.enum(["pending", "scheduled", "completed", "held", "failed"]).optional(),
+  settlement_status: z.nativeEnum(PrismaSettlementStatus).optional(),
 });
 
 const reviewStatusQuerySchema = z.object({
@@ -378,9 +378,9 @@ router.get("/bookings", async (req: AuthRequest, res: Response, next: NextFuncti
     const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>);
     const { booking_status, payment_status } = bookingListQuerySchema.parse(req.query);
 
-    const where = {
-      ...(booking_status && { booking_status }),
-      ...(payment_status && { payment_status }),
+    const where: Prisma.BookingWhereInput = {
+      ...(booking_status ? { booking_status } : {}),
+      ...(payment_status ? { payment_status } : {}),
     };
 
     const [items, total] = await Promise.all([
@@ -406,9 +406,9 @@ router.get("/bookings", async (req: AuthRequest, res: Response, next: NextFuncti
 router.patch("/bookings/:id", async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const schema = z.object({
-      booking_status: z.enum(["pending", "negotiating", "accepted", "rejected", "payment_pending", "confirmed", "completed", "canceled", "disputed"]).optional(),
-      payment_status: z.enum(["unpaid", "deposit_paid", "fully_paid", "refunded", "failed"]).optional(),
-      settlement_status: z.enum(["pending", "scheduled", "completed", "held", "failed"]).optional(),
+      booking_status: z.nativeEnum(PrismaBookingStatus).optional(),
+      payment_status: z.nativeEnum(PrismaPaymentStatus).optional(),
+      settlement_status: z.nativeEnum(PrismaSettlementStatus).optional(),
       cancel_reason: z.string().optional(),
     });
     const data = schema.parse(req.body);
@@ -433,9 +433,10 @@ router.patch("/bookings/:id", async (req: AuthRequest, res: Response, next: Next
     }
 
     const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const updateData: Prisma.BookingUpdateInput = { ...data };
       const changed = await tx.booking.update({
         where: { id: req.params.id },
-        data,
+        data: updateData,
       });
 
       if (data.booking_status === "completed" && booking.request && canTransitionRequest(booking.request.status, "completed")) {

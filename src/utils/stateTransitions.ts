@@ -17,6 +17,7 @@ export type BookingStatus =
   | "rejected"
   | "payment_pending"
   | "confirmed"
+  | "completion_requested"
   | "completed"
   | "canceled"
   | "disputed";
@@ -40,7 +41,8 @@ export const bookingTransitions: Record<BookingStatus, BookingStatus[]> = {
   accepted: ["payment_pending", "confirmed", "canceled", "disputed"],
   rejected: [],
   payment_pending: ["confirmed", "canceled", "disputed"],
-  confirmed: ["completed", "canceled", "disputed"],
+  confirmed: ["completion_requested", "completed", "canceled", "disputed"],
+  completion_requested: ["completed", "canceled", "disputed"],
   completed: [],
   canceled: [],
   disputed: ["canceled"],
