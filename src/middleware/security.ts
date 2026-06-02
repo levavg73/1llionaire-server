@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import { errorResponse } from "../utils/response";
+import { isAllowedClientOrigin } from "../utils/origins";
 
 const AUTH_COOKIE_NAMES = ["access_token", "refresh_token"];
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -9,9 +10,7 @@ const requestHasAuthCookie = (cookieHeader: string | undefined): boolean => {
   return AUTH_COOKIE_NAMES.some((cookieName) => cookieHeader.includes(`${cookieName}=`));
 };
 
-export const verifyTrustedOrigin = (allowedOrigins: string[]) => {
-  const allowed = new Set(allowedOrigins.filter(Boolean));
-
+export const verifyTrustedOrigin = () => {
   return (req: Request, res: Response, next: NextFunction) => {
     if (SAFE_METHODS.has(req.method)) return next();
 
@@ -20,7 +19,7 @@ export const verifyTrustedOrigin = (allowedOrigins: string[]) => {
     if (!requestHasAuthCookie(req.headers.cookie)) return next();
 
     const origin = req.headers.origin;
-    if (!origin || !allowed.has(origin)) {
+    if (!origin || !isAllowedClientOrigin(origin)) {
       return errorResponse(
         res,
         "FORBIDDEN",

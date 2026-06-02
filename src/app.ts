@@ -25,6 +25,7 @@ import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { env, isProduction } from "./config/env";
 import { noStoreForPrivateApi } from "./utils/cache";
 import { verifyTrustedOrigin } from "./middleware/security";
+import { isAllowedClientOrigin } from "./utils/origins";
 
 const app = express();
 
@@ -38,9 +39,6 @@ app.use(
   })
 );
 
-const allowedOrigins = [env.CLIENT_URL, env.CLIENT_URL_PROD].filter(
-  Boolean
-) as string[];
 
 app.use(
   cors({
@@ -48,8 +46,7 @@ app.use(
       origin: string | undefined,
       callback: (err: Error | null, allow?: boolean) => void
     ) => {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (isAllowedClientOrigin(origin)) return callback(null, true);
       return callback(new Error("CORS 정책에 의해 차단되었습니다."));
     },
     credentials: true,
@@ -58,7 +55,7 @@ app.use(
   })
 );
 
-app.use(verifyTrustedOrigin(allowedOrigins));
+app.use(verifyTrustedOrigin());
 
 // ─── Rate Limiting ───────────────────────────────────────────
 

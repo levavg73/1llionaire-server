@@ -24,6 +24,7 @@ import prisma from "../config/database";
 import { env, isProduction } from "../config/env";
 import { getCookie, setAuthCookies } from "../utils/authTokens";
 import { errorResponse } from "../utils/response";
+import { isAllowedClientOrigin } from "../utils/origins";
 
 const router = Router();
 
@@ -73,19 +74,11 @@ function normalizeOrigin(value: string): string {
   return new URL(value).origin;
 }
 
-function getAllowedRedirectOrigins(): Set<string> {
-  return new Set(
-    [env.CLIENT_URL, env.CLIENT_URL_PROD]
-      .filter(Boolean)
-      .map((value) => normalizeOrigin(value as string))
-  );
-}
-
 function assertAllowedRedirectUri(redirectUri: string): string {
   const normalized = normalizeUrl(redirectUri).replace(/\/+$/, "");
   const origin = normalizeOrigin(normalized);
 
-  if (!getAllowedRedirectOrigins().has(origin)) {
+  if (!isAllowedClientOrigin(origin)) {
     throw new Error("허용되지 않은 redirect_uri입니다.");
   }
 

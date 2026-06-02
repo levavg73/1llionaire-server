@@ -1,5 +1,5 @@
 {
   "framework": "express",
-  "installCommand": "pnpm install",
+  "installCommand": "pnpm install --prod=false",
   "buildCommand": "pnpm exec prisma generate"
 }
