@@ -16,8 +16,7 @@
     "db:migrate": "prisma migrate dev",
     "db:migrate:prod": "prisma migrate deploy",
     "db:seed": "ts-node prisma/seed.ts",
-    "db:studio": "prisma studio",
-    "vercel-build": "prisma generate && tsc --noEmit"
+    "db:studio": "prisma studio"
   },
   "engines": {
     "node": ">=18",
