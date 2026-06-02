@@ -482,15 +482,9 @@ router.get(
         email: user.email,
       });
 
-      // 프론트엔드 대시보드로 리다이렉트
-      const dashboardPath =
-        user.user_type === "admin"
-          ? "/admin"
-          : user.user_type === "customer"
-            ? "/customer/requests"
-            : "/freelancer/profile";
-
-      return res.redirect(302, `${payload.redirectUri}${dashboardPath}`);
+      // 프론트엔드로 리다이렉트 - 루트로 보내고 클라이언트가 role별 리다이렉트 처리
+      // ProtectedRoute의 isLoading race condition 방지
+      return res.redirect(302, `${payload.redirectUri}/?login_success=1`);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "소셜 로그인 처리 중 오류가 발생했습니다.";

@@ -249,4 +249,43 @@ router.delete(
   }
 );
 
+// ── PATCH /api/users/me/customer-profile — 고객 기업 정보 수정 ──
+
+const customerProfileSchema = z.object({
+  customer_type: z.enum(["individual", "company", "agency"]).optional(),
+  company_name: z.string().trim().max(100).optional(),
+  department: z.string().trim().max(80).optional(),
+  manager_name: z.string().trim().max(50).optional(),
+});
+
+router.patch(
+  "/me/customer-profile",
+  authenticate,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      if (req.user!.userType !== "customer") {
+        return errorResponse(
+          res,
+          "FORBIDDEN",
+          "고객 계정만 프로필을 수정할 수 있습니다.",
+          [],
+          403
+        );
+      }
+
+      const body = customerProfileSchema.parse(req.body);
+
+      const profile = await prisma.customerProfile.upsert({
+        where: { user_id: req.user!.userId },
+        update: body,
+        create: { user_id: req.user!.userId, ...body },
+      });
+
+      return successResponse(res, profile, "고객 프로필이 수정되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 export default router;
