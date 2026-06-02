@@ -335,7 +335,7 @@ router.post(
             customerUserId: booking.customer_id,
             freelancerUserId: booking.freelancer.user_id,
             eventTitle: booking.event_title,
-            contractId: contract.id,
+            bookingId: bookingId, // [FIX] contractId → bookingId
           });
         }
 

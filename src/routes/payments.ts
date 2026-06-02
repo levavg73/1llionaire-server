@@ -95,6 +95,7 @@ router.post(
 
       const booking = await prisma.booking.findFirst({
         where: { id: booking_id, customer_id: userId },
+        include: { contract: { select: { status: true } } },
       });
 
       if (!booking) {
@@ -113,6 +114,18 @@ router.post(
 
       if (booking.payment_status === "fully_paid") {
         return errorResponse(res, "CONFLICT", "이미 결제가 완료된 예약입니다.", [], 409);
+      }
+
+      // [P0] 계약서가 존재하는 경우 양측 서명 완료 여부 검증
+      // 계약서 없이 결제 진행은 허용 (MVP: 계약서는 선택)
+      if (booking.contract && booking.contract.status !== "fully_signed") {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "계약서에 양측 서명이 완료된 후 결제할 수 있습니다.",
+          [],
+          409
+        );
       }
 
       const orderId = generateOrderId(booking_id);

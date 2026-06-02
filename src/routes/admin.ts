@@ -502,6 +502,7 @@ router.get("/payments", async (req: AuthRequest, res: Response, next: NextFuncti
           platform_fee: true,
           payment_status: true,
           booking_status: true,
+          escrow_status: true,
           customer: { select: { name: true, email: true } },
           freelancer: { select: { display_name: true } },
         },

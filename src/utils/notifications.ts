@@ -144,17 +144,21 @@ export async function notifyReviewRequested(
   ]);
 }
 
-/** 5. 계약서 양측 서명 완료 → 양측 */
+/** 5. 계약서 양측 서명 완료 → 양측
+ *
+ * [FIX] contractId → bookingId
+ * 프론트엔드 라우트가 /contracts/:bookingId 기준이므로 bookingId로 통일
+ */
 export async function notifyContractSigned(
   prismaClient: PrismaWriter,
   opts: {
     customerUserId: string;
     freelancerUserId: string;
     eventTitle: string;
-    contractId: string;
+    bookingId: string; // ← contractId 아닌 bookingId
   }
 ): Promise<void> {
-  const link = `/contracts/${opts.contractId}`;
+  const link = `/contracts/${opts.bookingId}`;
 
   await Promise.all([
     createNotification(prismaClient, {

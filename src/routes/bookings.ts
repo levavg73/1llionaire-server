@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
-import { requireCustomerOrAdmin, requireAdmin } from "../middleware/roles";
+import { requireCustomer, requireCustomerOrAdmin, requireAdmin } from "../middleware/roles";
 import { AuthRequest, AuthPayload } from "../types";
 import {
   successResponse,
@@ -12,7 +12,7 @@ import {
   parsePagination,
 } from "../utils/response";
 import { canTransitionBooking, canTransitionRequest } from "../utils/stateTransitions";
-import { createNotification } from "../utils/notifications";
+import { createNotification, notifyReviewRequested } from "../utils/notifications";
 import { attachSignedProfileImageUrl } from "../utils/profileImages";
 
 const router = Router();
@@ -672,7 +672,54 @@ router.patch(
   }
 );
 
-// PATCH /api/bookings/:id/complete
+// PATCH /api/bookings/:id/complete-by-customer — 고객 직접 행사 완료 확인
+router.patch(
+  "/:id/complete-by-customer",
+  authenticate,
+  requireCustomer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const booking = await prisma.booking.findFirst({
+        where: { id: req.params.id, customer_id: req.user!.userId },
+        include: { freelancer: { select: { user_id: true } } },
+      });
+
+      if (!booking) {
+        return errorResponse(res, "NOT_FOUND", "예약을 찾을 수 없습니다.", [], 404);
+      }
+
+      if (booking.booking_status !== "confirmed") {
+        return errorResponse(res, "CONFLICT", "예약 확정 상태에서만 행사 완료를 확인할 수 있습니다.", [], 409);
+      }
+
+      if (booking.payment_status !== "fully_paid") {
+        return errorResponse(res, "CONFLICT", "결제 완료 후 행사 완료를 확인할 수 있습니다.", [], 409);
+      }
+
+      const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const completed = await tx.booking.update({
+          where: { id: req.params.id },
+          data: { booking_status: "completed" },
+        });
+
+        await notifyReviewRequested(tx, {
+          customerUserId: completed.customer_id,
+          freelancerUserId: booking.freelancer.user_id,
+          eventTitle: completed.event_title,
+          bookingId: completed.id,
+        });
+
+        return completed;
+      });
+
+      return successResponse(res, updated, "행사 완료가 확인되었습니다. 후기를 작성해 주세요.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// PATCH /api/bookings/:id/complete — 관리자 행사 완료 처리
 router.patch(
   "/:id/complete",
   authenticate,
@@ -681,7 +728,10 @@ router.patch(
     try {
       const booking = await prisma.booking.findUnique({
         where: { id: req.params.id },
-        include: { request: true },
+        include: {
+          request: true,
+          freelancer: { select: { user_id: true } },
+        },
       });
 
       if (!booking) {
@@ -701,6 +751,13 @@ router.patch(
         if (booking.request && canTransitionRequest(booking.request.status, "completed")) {
           await tx.eventRequest.update({ where: { id: booking.request.id }, data: { status: "completed" } });
         }
+
+        await notifyReviewRequested(tx, {
+          customerUserId: completed.customer_id,
+          freelancerUserId: booking.freelancer.user_id,
+          eventTitle: completed.event_title,
+          bookingId: completed.id,
+        });
 
         return completed;
       });
