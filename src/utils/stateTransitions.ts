@@ -48,10 +48,22 @@ export const bookingTransitions: Record<BookingStatus, BookingStatus[]> = {
   disputed: ["canceled"],
 };
 
-export const canTransitionRequest = (from: RequestStatus, to: RequestStatus): boolean => {
-  return from === to || requestTransitions[from].includes(to);
+const isRequestStatus = (status: string): status is RequestStatus => {
+  return Object.prototype.hasOwnProperty.call(requestTransitions, status);
 };
 
-export const canTransitionBooking = (from: BookingStatus, to: BookingStatus): boolean => {
-  return from === to || bookingTransitions[from].includes(to);
+const isBookingStatus = (status: string): status is BookingStatus => {
+  return Object.prototype.hasOwnProperty.call(bookingTransitions, status);
+};
+
+export const canTransitionRequest = (from: string, to: string): boolean => {
+  if (from === to) return true;
+  if (!isRequestStatus(from) || !isRequestStatus(to)) return false;
+  return requestTransitions[from].includes(to);
+};
+
+export const canTransitionBooking = (from: string, to: string): boolean => {
+  if (from === to) return true;
+  if (!isBookingStatus(from) || !isBookingStatus(to)) return false;
+  return bookingTransitions[from].includes(to);
 };
