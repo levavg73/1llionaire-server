@@ -4,16 +4,21 @@
  * 지원 프로바이더: kakao | google
  *
  * 플로우:
- *  1. GET /api/auth/oauth/:provider?user_type=customer&redirect_uri=...
+ *  1. GET /api/auth/oauth/:provider?redirect_uri=...
  *     → OAuth 제공사 인가 페이지로 리다이렉트
  *  2. GET /api/auth/oauth/:provider/callback?code=...&state=...
- *     → 토큰 교환 → 사용자 정보 조회 → DB upsert → 쿠키 발급 → 프론트 리다이렉트
+ *     → 기존 계정이면 쿠키 발급 후 로그인 완료
+ *     → 신규 계정이면 provider 정보를 임시 쿠키에 저장하고 역할 선택 페이지로 이동
+ *  3. POST /api/auth/oauth/complete { name, user_type }
+ *     → 사용자가 입력한 이름/역할로 신규 OAuth 사용자를 생성하고 쿠키 발급
  *
  * 보안/운영 포인트:
- *  - state는 HMAC 서명 + oauth_state 쿠키로 검증합니다.
- *  - Render 재시작/슬립으로 state 메모리가 사라지는 문제를 피합니다.
+ *  - state와 신규 가입 pending 데이터는 HMAC 서명으로 변조를 검증합니다.
  *  - redirect_uri는 CLIENT_URL / CLIENT_URL_PROD origin만 허용합니다.
+ *  - 기존 계정 자동 연결은 provider가 검증한 이메일에 대해서만 허용합니다.
  *  - 카카오는 이메일 동의를 강제하지 않습니다. 이메일이 없으면 내부용 대체 이메일을 생성합니다.
+ *  - 신규 OAuth 가입자의 이름은 provider 값이 아니라 사용자가 입력한 값만 저장합니다.
+ *  - OAuth 신규 가입자는 비밀번호 없이 생성되며, 설정 화면에서 최초 비밀번호를 설정할 수 있습니다.
  */
 
 import { Router, Request, Response, NextFunction } from "express";
@@ -23,7 +28,7 @@ import { z } from "zod";
 import prisma from "../config/database";
 import { env, isProduction } from "../config/env";
 import { getCookie, setAuthCookies } from "../utils/authTokens";
-import { errorResponse } from "../utils/response";
+import { errorResponse, successResponse } from "../utils/response";
 import { isAllowedClientOrigin } from "../utils/origins";
 
 const router = Router();
@@ -36,7 +41,7 @@ type OAuthUserType = "customer" | "freelancer";
 interface OAuthUserInfo {
   providerId: string;
   email?: string;
-  emailVerified?: boolean;
+  emailVerified: boolean;
   name: string;
 }
 
@@ -45,33 +50,51 @@ interface OAuthDbUser {
   user_type: string;
   email: string;
   name: string;
-}
-
-interface OAuthUpsertResult {
-  user: OAuthDbUser;
-  isNew: boolean;
+  is_active: boolean;
 }
 
 interface OAuthStatePayload {
   provider: OAuthProvider;
-  userType: OAuthUserType;
   redirectUri: string;
   nonce: string;
   expiresAt: number;
 }
 
+interface PendingOAuthPayload extends OAuthStatePayload {
+  providerId: string;
+  email?: string;
+  emailVerified: boolean;
+}
+
 // ─── 공통 유틸 ────────────────────────────────────────────────
 
 const STATE_COOKIE_NAME = "oauth_state";
-const STATE_MAX_AGE_MS = 10 * 60 * 1000;
+const PENDING_COOKIE_NAME = "oauth_pending";
+const OAUTH_SESSION_MAX_AGE_MS = 10 * 60 * 1000;
 
 const stateCookieOptions = {
   httpOnly: true,
   secure: isProduction,
   sameSite: "lax" as const,
   path: "/api/auth/oauth",
-  maxAge: STATE_MAX_AGE_MS,
+  maxAge: OAUTH_SESSION_MAX_AGE_MS,
 };
+
+const pendingCookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? ("none" as const) : ("lax" as const),
+  path: "/api/auth/oauth",
+  maxAge: OAUTH_SESSION_MAX_AGE_MS,
+};
+
+const oauthUserSelect = {
+  id: true,
+  user_type: true,
+  email: true,
+  name: true,
+  is_active: true,
+} as const;
 
 function getFrontendOrigin(): string {
   return (env.CLIENT_URL_PROD || env.CLIENT_URL).replace(/\/+$/, "");
@@ -139,14 +162,14 @@ function sign(value: string): string {
   return crypto.createHmac("sha256", env.JWT_SECRET).update(value).digest("base64url");
 }
 
-function createSignedState(payload: OAuthStatePayload): string {
+function createSignedPayload(payload: object): string {
   const encodedPayload = base64UrlEncode(JSON.stringify(payload));
   const signature = sign(encodedPayload);
   return `${encodedPayload}.${signature}`;
 }
 
-function verifySignedState(state: string): OAuthStatePayload | null {
-  const [encodedPayload, signature] = state.split(".");
+function verifySignedPayload<T>(signedPayload: string): T | null {
+  const [encodedPayload, signature] = signedPayload.split(".");
   if (!encodedPayload || !signature) return null;
 
   const expected = sign(encodedPayload);
@@ -161,7 +184,7 @@ function verifySignedState(state: string): OAuthStatePayload | null {
   }
 
   try {
-    return JSON.parse(base64UrlDecode(encodedPayload)) as OAuthStatePayload;
+    return JSON.parse(base64UrlDecode(encodedPayload)) as T;
   } catch {
     return null;
   }
@@ -180,9 +203,26 @@ function clearOAuthStateCookie(res: Response): void {
   });
 }
 
+function setPendingOAuthCookie(res: Response, payload: PendingOAuthPayload): void {
+  res.cookie(PENDING_COOKIE_NAME, createSignedPayload(payload), pendingCookieOptions);
+}
+
+function clearPendingOAuthCookie(res: Response): void {
+  res.clearCookie(PENDING_COOKIE_NAME, {
+    httpOnly: pendingCookieOptions.httpOnly,
+    secure: pendingCookieOptions.secure,
+    sameSite: pendingCookieOptions.sameSite,
+    path: pendingCookieOptions.path,
+  });
+}
+
 function buildErrorRedirect(base: string | undefined, message: string): string {
   const safeBase = base || getFrontendOrigin();
   return `${safeBase}/login?error=${encodeURIComponent(message)}`;
+}
+
+function buildOAuthRoleRedirect(base: string, provider: OAuthProvider): string {
+  return `${base}/oauth-role?provider=${encodeURIComponent(provider)}`;
 }
 
 function makeProviderFallbackEmail(provider: OAuthProvider, providerId: string): string {
@@ -201,6 +241,26 @@ function getOAuthErrorMessage(req: Request): string {
   if (error_description) return `OAuth 오류: ${error_description}`;
   if (error) return `OAuth 오류: ${error}`;
   return "OAuth 인증이 취소되었거나 실패했습니다.";
+}
+
+function assertActiveUser(user: OAuthDbUser): OAuthDbUser {
+  if (!user.is_active) {
+    throw new Error("비활성화된 계정입니다. 고객센터에 문의해 주세요.");
+  }
+
+  return user;
+}
+
+function toAuthSession(user: OAuthDbUser) {
+  return {
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      user_type: user.user_type,
+    },
+    auth: { type: "httpOnlyCookie" as const },
+  };
 }
 
 // ─── 프로바이더별 설정 ────────────────────────────────────────
@@ -275,15 +335,13 @@ async function exchangeKakaoCode(code: string): Promise<OAuthUserInfo> {
 
   const account = userRes.data.kakao_account;
   const providerId = String(userRes.data.id);
+  const email = normalizeEmail(account?.email);
 
   return {
     providerId,
-    email: normalizeEmail(account?.email),
-    emailVerified: Boolean(account?.email && account.is_email_valid === true && account.is_email_verified === true),
-    name:
-      account?.profile?.nickname ||
-      userRes.data.properties?.nickname ||
-      "카카오 사용자",
+    email,
+    emailVerified: Boolean(email && account?.is_email_valid === true && account?.is_email_verified === true),
+    name: account?.profile?.nickname || userRes.data.properties?.nickname || "카카오 사용자",
   };
 }
 
@@ -314,53 +372,59 @@ async function exchangeGoogleCode(code: string): Promise<OAuthUserInfo> {
     headers: { Authorization: `Bearer ${tokenRes.data.access_token}` },
   });
 
+  const email = normalizeEmail(userRes.data.email);
+
   return {
     providerId: userRes.data.sub,
-    email: normalizeEmail(userRes.data.email),
-    emailVerified: Boolean(userRes.data.email && userRes.data.email_verified === true),
+    email,
+    emailVerified: Boolean(email && userRes.data.email_verified === true),
     name: userRes.data.name || "Google 사용자",
   };
 }
 
-async function upsertOAuthUser(
+async function findLoginUserByOAuth(
   provider: OAuthProvider,
-  info: OAuthUserInfo,
-  userType: OAuthUserType
-): Promise<OAuthUpsertResult> {
-  // 1. 같은 provider + providerId 찾기
-  const user = await prisma.user.findFirst({
+  info: Pick<OAuthUserInfo, "providerId" | "email" | "emailVerified">
+): Promise<OAuthDbUser | null> {
+  const providerUser = await prisma.user.findFirst({
     where: { provider, provider_id: info.providerId },
-    select: { id: true, user_type: true, email: true, name: true },
+    select: oauthUserSelect,
   });
 
-  if (user) return { user, isNew: false };
+  if (providerUser) return assertActiveUser(providerUser);
 
-  // 2. 제공자가 검증한 이메일이 있는 경우에만 기존 이메일 계정과 연결
-  const verifiedEmail = info.emailVerified ? info.email : undefined;
-  if (verifiedEmail) {
-    const existingByEmail = await prisma.user.findUnique({
-      where: { email: verifiedEmail },
-      select: { id: true, user_type: true, email: true, name: true },
-    });
+  if (!info.emailVerified || !info.email) return null;
 
-    if (existingByEmail) {
-      const linkedUser = await prisma.user.update({
-        where: { id: existingByEmail.id },
-        data: { provider, provider_id: info.providerId },
-        select: { id: true, user_type: true, email: true, name: true },
-      });
-      return { user: linkedUser, isNew: false };
-    }
-  }
+  const emailUser = await prisma.user.findUnique({
+    where: { email: info.email },
+    select: oauthUserSelect,
+  });
 
-  const email = verifiedEmail || makeProviderFallbackEmail(provider, info.providerId);
+  if (!emailUser) return null;
 
-  // 3. 신규 사용자 생성
-  const newUser = await prisma.user.create({
+  assertActiveUser(emailUser);
+
+  return prisma.user.update({
+    where: { id: emailUser.id },
+    data: { provider, provider_id: info.providerId },
+    select: oauthUserSelect,
+  });
+}
+
+async function createOAuthUser(
+  provider: OAuthProvider,
+  info: Pick<OAuthUserInfo, "providerId" | "email" | "emailVerified">,
+  userType: OAuthUserType,
+  profile: { name: string }
+): Promise<OAuthDbUser> {
+  const email = info.emailVerified && info.email
+    ? info.email
+    : makeProviderFallbackEmail(provider, info.providerId);
+  return prisma.user.create({
     data: {
       email,
-      name: info.name,
-      password_hash: "", // 소셜 로그인은 비밀번호 없음
+      name: profile.name,
+      password_hash: "",
       user_type: userType,
       provider,
       provider_id: info.providerId,
@@ -369,17 +433,27 @@ async function upsertOAuthUser(
         ? { customer_profile: { create: {} } }
         : { freelancer_profile: { create: {} } }),
     },
-    select: { id: true, user_type: true, email: true, name: true },
+    select: oauthUserSelect,
   });
+}
 
-  return { user: newUser, isNew: true };
+async function signInOAuthUser(res: Response, user: OAuthDbUser): Promise<void> {
+  await setAuthCookies(res, {
+    id: user.id,
+    user_type: user.user_type,
+    email: user.email,
+  });
 }
 
 // ─── 라우트 ──────────────────────────────────────────────────
 
 const initQuerySchema = z.object({
-  user_type: z.enum(["customer", "freelancer"]).default("customer"),
   redirect_uri: z.string().url("유효한 redirect_uri를 입력해 주세요."),
+});
+
+const completeOAuthSchema = z.object({
+  name: z.string().trim().min(1, "이름을 입력해 주세요.").max(50, "50자 이하로 입력해 주세요."),
+  user_type: z.enum(["customer", "freelancer"]),
 });
 
 // GET /api/auth/oauth/:provider
@@ -403,19 +477,15 @@ router.get(
 
       const payload: OAuthStatePayload = {
         provider,
-        userType: query.user_type,
         redirectUri,
         nonce: crypto.randomBytes(16).toString("hex"),
-        expiresAt: Date.now() + STATE_MAX_AGE_MS,
+        expiresAt: Date.now() + OAUTH_SESSION_MAX_AGE_MS,
       };
 
-      const state = createSignedState(payload);
+      const state = createSignedPayload(payload);
       setOAuthStateCookie(res, state);
 
-      const authUrl =
-        provider === "kakao"
-          ? getKakaoAuthUrl(state)
-          : getGoogleAuthUrl(state);
+      const authUrl = provider === "kakao" ? getKakaoAuthUrl(state) : getGoogleAuthUrl(state);
 
       return res.redirect(302, authUrl);
     } catch (err) {
@@ -427,7 +497,7 @@ router.get(
 // GET /api/auth/oauth/:provider/callback
 router.get(
   "/:provider/callback",
-  async (req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, _next: NextFunction) => {
     const provider = req.params.provider as OAuthProvider;
     const { code, state } = req.query as Record<string, string | undefined>;
 
@@ -441,11 +511,13 @@ router.get(
 
       if (req.query.error) {
         clearOAuthStateCookie(res);
+        clearPendingOAuthCookie(res);
         return res.redirect(302, buildErrorRedirect(undefined, getOAuthErrorMessage(req)));
       }
 
       if (!code || !state) {
         clearOAuthStateCookie(res);
+        clearPendingOAuthCookie(res);
         return res.redirect(
           302,
           buildErrorRedirect(undefined, "OAuth 인증 코드 또는 state가 없습니다.")
@@ -455,15 +527,17 @@ router.get(
       const cookieState = getCookie(req.headers.cookie, STATE_COOKIE_NAME);
       if (!cookieState || cookieState !== state) {
         clearOAuthStateCookie(res);
+        clearPendingOAuthCookie(res);
         return res.redirect(
           302,
           buildErrorRedirect(undefined, "OAuth state가 일치하지 않습니다. 다시 로그인해 주세요.")
         );
       }
 
-      const payload = verifySignedState(state);
+      const payload = verifySignedPayload<OAuthStatePayload>(state);
       if (!payload) {
         clearOAuthStateCookie(res);
+        clearPendingOAuthCookie(res);
         return res.redirect(
           302,
           buildErrorRedirect(undefined, "유효하지 않은 OAuth state입니다. 다시 로그인해 주세요.")
@@ -473,6 +547,7 @@ router.get(
       clearOAuthStateCookie(res);
 
       if (payload.provider !== provider) {
+        clearPendingOAuthCookie(res);
         return res.redirect(
           302,
           buildErrorRedirect(payload.redirectUri, "OAuth 프로바이더 정보가 일치하지 않습니다.")
@@ -480,45 +555,90 @@ router.get(
       }
 
       if (payload.expiresAt < Date.now()) {
+        clearPendingOAuthCookie(res);
         return res.redirect(
           302,
           buildErrorRedirect(payload.redirectUri, "OAuth 세션이 만료되었습니다. 다시 로그인해 주세요.")
         );
       }
 
-      const info =
-        provider === "kakao"
-          ? await exchangeKakaoCode(code)
-          : await exchangeGoogleCode(code);
+      const info = provider === "kakao" ? await exchangeKakaoCode(code) : await exchangeGoogleCode(code);
+      const existingUser = await findLoginUserByOAuth(provider, info);
 
-      const result = await upsertOAuthUser(provider, info, payload.userType);
-      const { user } = result;
+      if (existingUser) {
+        clearPendingOAuthCookie(res);
+        await signInOAuthUser(res, existingUser);
+        return res.redirect(302, `${payload.redirectUri}/?login_success=1`);
+      }
 
-      // 쿠키 발급 (기존 이메일 로그인과 동일)
-      await setAuthCookies(res, {
-        id: user.id,
-        user_type: user.user_type,
-        email: user.email,
+      setPendingOAuthCookie(res, {
+        provider,
+        providerId: info.providerId,
+        email: info.email,
+        emailVerified: info.emailVerified,
+        redirectUri: payload.redirectUri,
+        nonce: crypto.randomBytes(16).toString("hex"),
+        expiresAt: Date.now() + OAUTH_SESSION_MAX_AGE_MS,
       });
 
-      // 프론트엔드로 리다이렉트 - 루트로 보내고 클라이언트가 role별 리다이렉트 처리
-      // ProtectedRoute의 isLoading race condition 방지
-      // 신규 소셜 가입자 (이름이 기본값이면 이름 설정 페이지로)
-      const needsNameSetup =
-        result.isNew &&
-        (!result.user.name ||
-          result.user.name === "카카오 사용자" ||
-          result.user.name === "Google 사용자");
-
-      const redirectParam = needsNameSetup ? "login_success=1&setup=name" : "login_success=1";
-      return res.redirect(302, `${payload.redirectUri}/?${redirectParam}`);
+      return res.redirect(302, buildOAuthRoleRedirect(payload.redirectUri, provider));
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "소셜 로그인 처리 중 오류가 발생했습니다.";
+      const message = err instanceof Error ? err.message : "소셜 로그인 처리 중 오류가 발생했습니다.";
 
+      clearOAuthStateCookie(res);
+      clearPendingOAuthCookie(res);
       return res.redirect(302, buildErrorRedirect(undefined, message));
     }
   }
 );
+
+// POST /api/auth/oauth/complete
+router.post("/complete", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = completeOAuthSchema.parse(req.body);
+    const pendingCookie = getCookie(req.headers.cookie, PENDING_COOKIE_NAME);
+
+    if (!pendingCookie) {
+      return errorResponse(
+        res,
+        "UNAUTHORIZED",
+        "소셜 인증 정보가 만료되었습니다. 다시 시도해 주세요.",
+        [],
+        401
+      );
+    }
+
+    const pending = verifySignedPayload<PendingOAuthPayload>(pendingCookie);
+
+    if (!pending || pending.expiresAt < Date.now()) {
+      clearPendingOAuthCookie(res);
+      return errorResponse(
+        res,
+        "UNAUTHORIZED",
+        "소셜 인증 정보가 만료되었습니다. 다시 시도해 주세요.",
+        [],
+        401
+      );
+    }
+
+    const existingUser = await findLoginUserByOAuth(pending.provider, pending);
+    const user = existingUser
+      ?? (await createOAuthUser(pending.provider, pending, body.user_type, {
+        name: body.name,
+      }));
+
+    clearPendingOAuthCookie(res);
+    await signInOAuthUser(res, user);
+
+    return successResponse(
+      res,
+      toAuthSession(user),
+      "소셜 계정으로 시작합니다.",
+      existingUser ? 200 : 201
+    );
+  } catch (err) {
+    next(err);
+  }
+});
 
 export default router;
