@@ -110,6 +110,29 @@ function buildSignatureHash(
     .digest("hex");
 }
 
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function formatKoDate(value: string | Date | null | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return escapeHtml(value);
+  return escapeHtml(date.toLocaleDateString("ko-KR"));
+}
+
+function formatKoDateTime(value: string | Date | null | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return escapeHtml(value);
+  return escapeHtml(date.toLocaleString("ko-KR"));
+}
+
 // ─── 권한 확인 헬퍼 ─────────────────────────────────────────
 
 async function getBookingWithParties(bookingId: string) {
@@ -241,6 +264,10 @@ router.post(
     try {
       const { userId, userType } = req.user!;
       const { bookingId } = req.params;
+
+      if (userType === "admin") {
+        return errorResponse(res, "FORBIDDEN", "관리자는 계약 당사자 서명을 대신할 수 없습니다.", [], 403);
+      }
 
       const booking = await getBookingWithParties(bookingId);
       if (!booking) {
@@ -374,11 +401,24 @@ router.get(
       const c = booking.contract.content_json as unknown as ContractContent;
       const contract = booking.contract;
 
+      const contractTitle = escapeHtml(c.event_title);
+      const customerLabel = `${escapeHtml(c.customer_name)} (${escapeHtml(c.customer_email)})`;
+      const freelancerLabel = `${escapeHtml(c.freelancer_display_name)} (${escapeHtml(c.freelancer_name)})`;
+      const termsHtml = Array.isArray(c.terms)
+        ? c.terms.map((term) => `<li>${escapeHtml(term)}</li>`).join("")
+        : "";
+      const customerSignatureHtml = contract.customer_signed_at
+        ? `<p>✅ 서명 완료</p><p class="sig-label">${formatKoDateTime(contract.customer_signed_at)}</p><p class="sig-label" style="word-break:break-all;font-size:10px;">Hash: ${escapeHtml(contract.customer_signature_hash)}</p>`
+        : "<p style='color:#999'>서명 대기 중</p>";
+      const freelancerSignatureHtml = contract.freelancer_signed_at
+        ? `<p>✅ 서명 완료</p><p class="sig-label">${formatKoDateTime(contract.freelancer_signed_at)}</p><p class="sig-label" style="word-break:break-all;font-size:10px;">Hash: ${escapeHtml(contract.freelancer_signature_hash)}</p>`
+        : "<p style='color:#999'>서명 대기 중</p>";
+
       const html = `<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<title>행사 진행 계약서 - ${c.event_title}</title>
+<title>행사 진행 계약서 - ${contractTitle}</title>
 <style>
   body { font-family: "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; max-width: 800px; margin: 40px auto; color: #111; line-height: 1.7; }
   h1 { text-align: center; border-bottom: 2px solid #111; padding-bottom: 12px; }
@@ -395,20 +435,20 @@ router.get(
 </head>
 <body>
 <h1>행사 진행 계약서</h1>
-<p style="text-align:center;color:#666;font-size:13px;">계약 생성일: ${new Date(c.generated_at).toLocaleDateString("ko-KR")}</p>
+<p style="text-align:center;color:#666;font-size:13px;">계약 생성일: ${formatKoDate(c.generated_at)}</p>
 
 <h2>1. 계약 당사자</h2>
 <table>
-  <tr><th>의뢰인(고객)</th><td>${c.customer_name} (${c.customer_email})</td></tr>
-  <tr><th>수임인(진행자)</th><td>${c.freelancer_display_name} (${c.freelancer_name})</td></tr>
+  <tr><th>의뢰인(고객)</th><td>${customerLabel}</td></tr>
+  <tr><th>수임인(진행자)</th><td>${freelancerLabel}</td></tr>
 </table>
 
 <h2>2. 행사 정보</h2>
 <table>
-  <tr><th>행사명</th><td>${c.event_title}</td></tr>
-  <tr><th>행사 일자</th><td>${c.event_date}</td></tr>
-  <tr><th>진행 시간</th><td>${c.start_time} ~ ${c.end_time}</td></tr>
-  <tr><th>장소</th><td>${c.venue ?? "미정"}</td></tr>
+  <tr><th>행사명</th><td>${contractTitle}</td></tr>
+  <tr><th>행사 일자</th><td>${escapeHtml(c.event_date)}</td></tr>
+  <tr><th>진행 시간</th><td>${escapeHtml(c.start_time)} ~ ${escapeHtml(c.end_time)}</td></tr>
+  <tr><th>장소</th><td>${escapeHtml(c.venue ?? "미정")}</td></tr>
 </table>
 
 <h2>3. 계약 금액</h2>
@@ -427,7 +467,7 @@ router.get(
 
 <h2>5. 계약 조건</h2>
 <ul class="term-list">
-  ${c.terms.map((t) => `<li>${t}</li>`).join("")}
+  ${termsHtml}
 </ul>
 
 <h2>6. 서명</h2>
@@ -438,16 +478,10 @@ router.get(
   </tr>
   <tr>
     <td>
-      ${contract.customer_signed_at
-        ? `<p>✅ 서명 완료</p><p class="sig-label">${new Date(contract.customer_signed_at).toLocaleString("ko-KR")}</p><p class="sig-label" style="word-break:break-all;font-size:10px;">Hash: ${contract.customer_signature_hash}</p>`
-        : "<p style='color:#999'>서명 대기 중</p>"
-      }
+      ${customerSignatureHtml}
     </td>
     <td>
-      ${contract.freelancer_signed_at
-        ? `<p>✅ 서명 완료</p><p class="sig-label">${new Date(contract.freelancer_signed_at).toLocaleString("ko-KR")}</p><p class="sig-label" style="word-break:break-all;font-size:10px;">Hash: ${contract.freelancer_signature_hash}</p>`
-        : "<p style='color:#999'>서명 대기 중</p>"
-      }
+      ${freelancerSignatureHtml}
     </td>
   </tr>
 </table>
@@ -459,6 +493,13 @@ router.get(
 </html>`;
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader(
+        "Content-Security-Policy",
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      );
       return res.send(html);
     } catch (err) {
       next(err);

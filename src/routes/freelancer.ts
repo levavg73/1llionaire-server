@@ -24,6 +24,7 @@ import {
   attachSignedProfileImageUrl,
   createProfileImageSignedUrl,
   getSupabaseAdminClient,
+  isOwnProfileImagePath,
 } from "../utils/profileImages";
 
 const router = Router();
@@ -52,10 +53,6 @@ function hasValidProfileImageSignature(file: Express.Multer.File) {
 
 function buildProfileImageStoragePath(userId: string, file: Express.Multer.File) {
   return `freelancers/${userId}/${Date.now()}-${crypto.randomUUID()}${getProfileImageExtension(file)}`;
-}
-
-function isOwnProfileImagePath(userId: string, path?: string | null) {
-  return Boolean(path && path.startsWith(`freelancers/${userId}/`));
 }
 
 async function deleteStoredProfileImage(path?: string | null) {
@@ -111,6 +108,19 @@ function handleProfileImageUpload(req: AuthRequest, res: Response, next: NextFun
     const message = err instanceof Error ? err.message : "프로필 이미지 업로드 요청이 올바르지 않습니다.";
     return errorResponse(res, "BAD_REQUEST", message, [], 400);
   });
+}
+
+function assertOwnProfileImagePath(req: AuthRequest, res: Response, path: string) {
+  if (isOwnProfileImagePath(req.user!.userId, path)) return true;
+
+  errorResponse(
+    res,
+    "VALIDATION_ERROR",
+    "프로필 이미지는 본인 계정으로 업로드된 이미지 경로만 사용할 수 있습니다.",
+    [],
+    400
+  );
+  return false;
 }
 
 // ── Zod 스키마 ──────────────────────────────────────────────
@@ -291,6 +301,8 @@ router.post(
     try {
       const body = profileSchema.parse(req.body);
 
+      if (!assertOwnProfileImagePath(req, res, body.profile_image_path)) return;
+
       const existing = await prisma.freelancerProfile.findUnique({
         where: { user_id: req.user!.userId },
       });
@@ -365,6 +377,8 @@ router.patch(
   async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const body = profileSchema.parse(req.body);
+
+      if (!assertOwnProfileImagePath(req, res, body.profile_image_path)) return;
 
       const existing = await prisma.freelancerProfile.findUnique({
         where: { user_id: req.user!.userId },

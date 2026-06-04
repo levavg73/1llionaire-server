@@ -36,6 +36,7 @@ type OAuthUserType = "customer" | "freelancer";
 interface OAuthUserInfo {
   providerId: string;
   email?: string;
+  emailVerified?: boolean;
   name: string;
 }
 
@@ -190,6 +191,11 @@ function makeProviderFallbackEmail(provider: OAuthProvider, providerId: string):
   return `${provider}_${providerId}@oauth.local`;
 }
 
+function normalizeEmail(email?: string): string | undefined {
+  const normalized = email?.trim().toLowerCase();
+  return normalized || undefined;
+}
+
 function getOAuthErrorMessage(req: Request): string {
   const { error, error_description } = req.query as Record<string, string | undefined>;
   if (error_description) return `OAuth 오류: ${error_description}`;
@@ -256,6 +262,8 @@ async function exchangeKakaoCode(code: string): Promise<OAuthUserInfo> {
     id: number;
     kakao_account?: {
       email?: string;
+      is_email_valid?: boolean;
+      is_email_verified?: boolean;
       profile?: { nickname?: string };
     };
     properties?: {
@@ -270,7 +278,8 @@ async function exchangeKakaoCode(code: string): Promise<OAuthUserInfo> {
 
   return {
     providerId,
-    email: account?.email,
+    email: normalizeEmail(account?.email),
+    emailVerified: Boolean(account?.email && account.is_email_valid === true && account.is_email_verified === true),
     name:
       account?.profile?.nickname ||
       userRes.data.properties?.nickname ||
@@ -299,6 +308,7 @@ async function exchangeGoogleCode(code: string): Promise<OAuthUserInfo> {
   const userRes = await axios.get<{
     sub: string;
     email?: string;
+    email_verified?: boolean;
     name?: string;
   }>("https://www.googleapis.com/oauth2/v3/userinfo", {
     headers: { Authorization: `Bearer ${tokenRes.data.access_token}` },
@@ -306,7 +316,8 @@ async function exchangeGoogleCode(code: string): Promise<OAuthUserInfo> {
 
   return {
     providerId: userRes.data.sub,
-    email: userRes.data.email,
+    email: normalizeEmail(userRes.data.email),
+    emailVerified: Boolean(userRes.data.email && userRes.data.email_verified === true),
     name: userRes.data.name || "Google 사용자",
   };
 }
@@ -324,10 +335,11 @@ async function upsertOAuthUser(
 
   if (user) return { user, isNew: false };
 
-  // 2. 이메일이 있는 경우에만 기존 이메일 계정과 연결
-  if (info.email) {
+  // 2. 제공자가 검증한 이메일이 있는 경우에만 기존 이메일 계정과 연결
+  const verifiedEmail = info.emailVerified ? info.email : undefined;
+  if (verifiedEmail) {
     const existingByEmail = await prisma.user.findUnique({
-      where: { email: info.email },
+      where: { email: verifiedEmail },
       select: { id: true, user_type: true, email: true, name: true },
     });
 
@@ -341,7 +353,7 @@ async function upsertOAuthUser(
     }
   }
 
-  const email = info.email || makeProviderFallbackEmail(provider, info.providerId);
+  const email = verifiedEmail || makeProviderFallbackEmail(provider, info.providerId);
 
   // 3. 신규 사용자 생성
   const newUser = await prisma.user.create({

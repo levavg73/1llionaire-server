@@ -286,13 +286,24 @@ router.post(
 // ─── PATCH /api/ai/requests/:id/apply-budget ─────────────────
 // 고객: AI 분석 결과를 요청서 예산에 반영
 
-const applyBudgetSchema = z.object({
-  budget_min: z.number().int().min(0),
-  budget_max: z.number().int().min(0),
-});
+const applyBudgetSchema = z
+  .object({
+    budget_min: z.number().int().min(0),
+    budget_max: z.number().int().min(0),
+  })
+  .superRefine((body, ctx) => {
+    if (body.budget_min > body.budget_max) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["budget_max"],
+        message: "최대 예산은 최소 예산보다 크거나 같아야 합니다.",
+      });
+    }
+  });
 
 router.patch(
   "/requests/:id/apply-budget",
+  requireCustomerOrAdmin,
   async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const { userId, userType } = req.user!;
@@ -307,7 +318,7 @@ router.patch(
         return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
       }
 
-      if (userType === "customer" && request.customer_id !== userId) {
+      if (userType !== "admin" && request.customer_id !== userId) {
         return errorResponse(res, "FORBIDDEN", "본인 요청서만 수정할 수 있습니다.", [], 403);
       }
 

@@ -450,6 +450,7 @@ router.get(
               event_date: true,
               final_price: true,
               customer_id: true,
+              freelancer: { select: { user_id: true } },
               booking_status: true,
               payment_status: true,
               escrow_status: true,
@@ -464,12 +465,17 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "결제 내역을 찾을 수 없습니다.", [], 404);
       }
 
-      if (userType === "customer" && payment.booking.customer_id !== userId) {
+      const isBookingCustomer = payment.booking.customer_id === userId;
+      const isBookingFreelancer = payment.booking.freelancer.user_id === userId;
+      const isAdmin = userType === "admin";
+
+      if (!isAdmin && !isBookingCustomer && !isBookingFreelancer) {
         return errorResponse(res, "FORBIDDEN", "접근 권한이 없습니다.", [], 403);
       }
 
-      const { raw_response: _raw, ...safePayment } = payment;
-      return successResponse(res, safePayment);
+      const { freelancer: _freelancer, ...safeBooking } = payment.booking;
+      const { raw_response: _raw, payment_key: _paymentKey, ...safePayment } = payment;
+      return successResponse(res, { ...safePayment, booking: safeBooking });
     } catch (err) {
       next(err);
     }

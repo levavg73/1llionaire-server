@@ -6,6 +6,25 @@ export const PROFILE_IMAGE_SIGNED_URL_EXPIRES_IN = 60 * 60;
 
 let supabaseAdminClient: SupabaseClient | null = null;
 
+const PROFILE_IMAGE_SAFE_PATH_PATTERN = /^freelancers\/[^/\\]+\/[^/\\]+$/;
+
+export function isSafeProfileImagePath(path?: string | null) {
+  return Boolean(
+    path &&
+      PROFILE_IMAGE_SAFE_PATH_PATTERN.test(path) &&
+      !path.includes("..")
+  );
+}
+
+export function isOwnProfileImagePath(userId: string, path?: string | null) {
+  const prefix = `freelancers/${userId}/`;
+  return Boolean(
+    path &&
+      path.startsWith(prefix) &&
+      isSafeProfileImagePath(path)
+  );
+}
+
 export function getSupabaseAdminClient() {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -27,7 +46,7 @@ export function getSupabaseAdminClient() {
 }
 
 export async function createProfileImageSignedUrl(path?: string | null) {
-  if (!path) return null;
+  if (!path || !isSafeProfileImagePath(path)) return null;
 
   try {
     const { data, error } = await getSupabaseAdminClient()
