@@ -30,6 +30,7 @@ import { env, isProduction } from "../config/env";
 import { getCookie, setAuthCookies } from "../utils/authTokens";
 import { errorResponse, successResponse } from "../utils/response";
 import { isAllowedClientOrigin } from "../utils/origins";
+import { toSafeUser } from "../utils/userResponse";
 
 const router = Router();
 
@@ -50,6 +51,8 @@ interface OAuthDbUser {
   user_type: string;
   email: string;
   name: string;
+  provider: string | null;
+  password_hash: string;
   is_active: boolean;
 }
 
@@ -93,6 +96,8 @@ const oauthUserSelect = {
   user_type: true,
   email: true,
   name: true,
+  provider: true,
+  password_hash: true,
   is_active: true,
 } as const;
 
@@ -225,6 +230,15 @@ function buildOAuthRoleRedirect(base: string, provider: OAuthProvider): string {
   return `${base}/oauth-role?provider=${encodeURIComponent(provider)}`;
 }
 
+function getDefaultPostAuthPath(userType: string): string {
+  if (userType === "admin") return "/admin";
+  return userType === "freelancer" ? "/freelancer/profile" : "/customer/requests";
+}
+
+function buildOAuthLoginRedirect(base: string, userType: string): string {
+  return `${base}${getDefaultPostAuthPath(userType)}`;
+}
+
 function makeProviderFallbackEmail(provider: OAuthProvider, providerId: string): string {
   // DB schema가 email String @unique / required라서 이메일 미동의 사용자를 위한 내부 식별값입니다.
   // 실제 사용자에게 이메일로 보여주거나 메일 발송에 사용하면 안 됩니다.
@@ -253,12 +267,7 @@ function assertActiveUser(user: OAuthDbUser): OAuthDbUser {
 
 function toAuthSession(user: OAuthDbUser) {
   return {
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      user_type: user.user_type,
-    },
+    user: toSafeUser(user),
     auth: { type: "httpOnlyCookie" as const },
   };
 }
@@ -568,7 +577,7 @@ router.get(
       if (existingUser) {
         clearPendingOAuthCookie(res);
         await signInOAuthUser(res, existingUser);
-        return res.redirect(302, `${payload.redirectUri}/?login_success=1`);
+        return res.redirect(302, buildOAuthLoginRedirect(payload.redirectUri, existingUser.user_type));
       }
 
       setPendingOAuthCookie(res, {

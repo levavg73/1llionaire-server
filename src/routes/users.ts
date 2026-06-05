@@ -8,6 +8,7 @@ import { AuthRequest } from "../types";
 import { successResponse, errorResponse } from "../utils/response";
 import { clearAuthCookies } from "../utils/authTokens";
 import { attachSignedProfileImageUrl } from "../utils/profileImages";
+import { toSafeUser } from "../utils/userResponse";
 
 const router = Router();
 
@@ -50,6 +51,8 @@ router.get("/me", authenticate, async (req: AuthRequest, res: Response, next: Ne
         email: true,
         user_type: true,
         phone: true,
+        provider: true,
+        password_hash: true,
         is_active: true,
         created_at: true,
         customer_profile: {
@@ -87,7 +90,7 @@ router.get("/me", authenticate, async (req: AuthRequest, res: Response, next: Ne
         }
       : user;
 
-    return successResponse(res, responseUser);
+    return successResponse(res, toSafeUser(responseUser));
   } catch (err) {
     next(err);
   }
@@ -108,11 +111,13 @@ router.patch("/me", authenticate, async (req: AuthRequest, res: Response, next: 
         email: true,
         user_type: true,
         phone: true,
+        provider: true,
+        password_hash: true,
         updated_at: true,
       },
     });
 
-    return successResponse(res, user, "정보가 수정되었습니다.");
+    return successResponse(res, toSafeUser(user), "정보가 수정되었습니다.");
   } catch (err) {
     next(err);
   }
@@ -134,6 +139,16 @@ router.patch(
 
       if (!user) {
         return errorResponse(res, "NOT_FOUND", "사용자를 찾을 수 없습니다.", [], 404);
+      }
+
+      if (!user.password_hash) {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "아직 비밀번호가 설정되지 않은 계정입니다. 비밀번호 설정을 먼저 이용해 주세요.",
+          [],
+          409
+        );
       }
 
       // 현재 비밀번호 검증
@@ -199,6 +214,16 @@ router.delete(
       // 관리자 계정 탈퇴 금지
       if (user.user_type === "admin") {
         return errorResponse(res, "FORBIDDEN", "관리자 계정은 탈퇴할 수 없습니다.", [], 403);
+      }
+
+      if (!user.password_hash) {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "소셜 계정은 비밀번호를 먼저 설정한 뒤 탈퇴할 수 있습니다.",
+          [],
+          409
+        );
       }
 
       // 비밀번호 확인
@@ -337,12 +362,22 @@ router.patch(
       }
 
       const hash = await bcrypt.hash(new_password, 12);
-      await prisma.user.update({
+      const updatedUser = await prisma.user.update({
         where: { id: req.user!.userId },
         data: { password_hash: hash },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          user_type: true,
+          phone: true,
+          provider: true,
+          password_hash: true,
+          updated_at: true,
+        },
       });
 
-      return successResponse(res, null, "비밀번호가 설정되었습니다.");
+      return successResponse(res, toSafeUser(updatedUser), "비밀번호가 설정되었습니다.");
     } catch (err) {
       next(err);
     }

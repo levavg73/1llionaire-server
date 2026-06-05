@@ -12,6 +12,7 @@ import {
   setAuthCookies,
 } from "../utils/authTokens";
 import { attachSignedProfileImageUrl } from "../utils/profileImages";
+import { toSafeUser } from "../utils/userResponse";
 
 const router = Router();
 
@@ -43,12 +44,15 @@ const updateMeSchema = z.object({
   phone: z.string().optional(),
 });
 
-const publicUserSelect = {
+const authUserSelect = {
   id: true,
   name: true,
   email: true,
   user_type: true,
   phone: true,
+  provider: true,
+  password_hash: true,
+  is_active: true,
   created_at: true,
 } as const;
 
@@ -109,14 +113,16 @@ router.post("/signup", async (req: Request, res: Response, next: NextFunction) =
           freelancer_profile: { create: {} },
         }),
       },
-      select: publicUserSelect,
+      select: authUserSelect,
     });
 
-    await setAuthCookies(res, user);
+    const responseUser = toSafeUser(user);
+
+    await setAuthCookies(res, responseUser);
 
     return successResponse(
       res,
-      { user, auth: { type: "httpOnlyCookie" } },
+      { user: responseUser, auth: { type: "httpOnlyCookie" } },
       "회원가입이 완료되었습니다.",
       201
     );
@@ -133,9 +139,14 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
 
     const user = await prisma.user.findUnique({
       where: { email: body.email },
+      select: authUserSelect,
     });
 
     if (!user || !user.is_active) {
+      return errorResponse(res, "UNAUTHORIZED", "이메일 또는 비밀번호가 올바르지 않습니다.", [], 401);
+    }
+
+    if (!user.password_hash) {
       return errorResponse(res, "UNAUTHORIZED", "이메일 또는 비밀번호가 올바르지 않습니다.", [], 401);
     }
 
@@ -144,16 +155,12 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
       return errorResponse(res, "UNAUTHORIZED", "이메일 또는 비밀번호가 올바르지 않습니다.", [], 401);
     }
 
-    await setAuthCookies(res, user);
+    const responseUser = toSafeUser(user);
+
+    await setAuthCookies(res, responseUser);
 
     return successResponse(res, {
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        user_type: user.user_type,
-        phone: user.phone,
-      },
+      user: responseUser,
       auth: { type: "httpOnlyCookie" },
     }, "로그인 성공");
   } catch (err) {
@@ -178,7 +185,7 @@ router.post("/refresh", async (req: Request, res: Response, next: NextFunction) 
         revoked_at: null,
         expires_at: { gt: new Date() },
       },
-      include: { user: true },
+      include: { user: { select: authUserSelect } },
     });
 
     if (!stored || !stored.user.is_active) {
@@ -191,16 +198,12 @@ router.post("/refresh", async (req: Request, res: Response, next: NextFunction) 
       data: { revoked_at: new Date() },
     });
 
-    await setAuthCookies(res, stored.user);
+    const responseUser = toSafeUser(stored.user);
+
+    await setAuthCookies(res, responseUser);
 
     return successResponse(res, {
-      user: {
-        id: stored.user.id,
-        name: stored.user.name,
-        email: stored.user.email,
-        user_type: stored.user.user_type,
-        phone: stored.user.phone,
-      },
+      user: responseUser,
       auth: { type: "httpOnlyCookie" },
     }, "토큰이 재발급되었습니다.");
   } catch (err) {
@@ -243,6 +246,8 @@ router.get("/me", authenticate, async (req: AuthRequest, res: Response, next: Ne
         email: true,
         user_type: true,
         phone: true,
+        provider: true,
+        password_hash: true,
         is_active: true,
         created_at: true,
         customer_profile: {
@@ -280,7 +285,7 @@ router.get("/me", authenticate, async (req: AuthRequest, res: Response, next: Ne
         }
       : user;
 
-    return successResponse(res, responseUser);
+    return successResponse(res, toSafeUser(responseUser));
   } catch (err) {
     next(err);
   }
@@ -301,11 +306,13 @@ router.patch("/me", authenticate, async (req: AuthRequest, res: Response, next: 
         email: true,
         user_type: true,
         phone: true,
+        provider: true,
+        password_hash: true,
         updated_at: true,
       },
     });
 
-    return successResponse(res, user, "정보가 수정되었습니다.");
+    return successResponse(res, toSafeUser(user), "정보가 수정되었습니다.");
   } catch (err) {
     next(err);
   }
