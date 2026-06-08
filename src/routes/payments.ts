@@ -75,7 +75,7 @@ async function postTossPayment<T>(
 
 function generateOrderId(bookingId: string): string {
   const ts = Date.now().toString(36).toUpperCase();
-  return `FREEMIC-${bookingId.slice(0, 8).toUpperCase()}-${ts}`;
+  return `VOIT-${bookingId.slice(0, 8).toUpperCase()}-${ts}`;
 }
 
 // ─── POST /api/payments/prepare ──────────────────────────────

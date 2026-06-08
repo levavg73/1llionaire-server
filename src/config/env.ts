@@ -47,7 +47,7 @@ const envSchema = z.object({
   KAKAO_CLIENT_ID: z.string().optional(),
   KAKAO_CLIENT_SECRET: z.string().optional(),
   // 카카오 OAuth redirect URI: 서버 콜백 URL
-  // ex) https://api.freemic.co.kr/api/auth/oauth/kakao/callback
+  // ex) https://api.voit.co.kr/api/auth/oauth/kakao/callback
   KAKAO_REDIRECT_URI: z.string().url().optional(),
 
   // ─── 소셜 로그인 (구글) ───────────────────────────────────

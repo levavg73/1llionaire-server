@@ -9,7 +9,7 @@ const PORT = env.PORT;
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     if (!isProduction) {
-      console.log(`\n🚀 프리마이크 API 서버`);
+      console.log(`\n🚀 VOIT API 서버`);
       console.log(`   http://localhost:${PORT}\n`);
     } else {
       console.log(`[server] listening on port ${PORT}`);

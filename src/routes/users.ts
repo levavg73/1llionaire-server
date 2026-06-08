@@ -256,7 +256,7 @@ router.delete(
       }
 
       // Soft delete: is_active = false + 이메일 익명화 + refresh token 폐기
-      const anonymizedEmail = `deleted_${user.id}@freemic.deleted`;
+      const anonymizedEmail = `deleted_${user.id}@voit.deleted`;
 
       await prisma.$transaction([
         prisma.user.update({

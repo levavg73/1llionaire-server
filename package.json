@@ -1,7 +1,7 @@
 {
-  "name": "freemic-server",
+  "name": "voit-server",
   "version": "1.0.0",
-  "description": "프리마이크 MVP 백엔드 API 서버",
+  "description": "VOIT MVP 백엔드 API 서버",
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",

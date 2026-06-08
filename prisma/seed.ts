@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { PrismaClient, UserType, FreelancerStatus, RequestStatus, BookingStatus, PaymentStatus, SettlementStatus, ReviewStatus } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
@@ -12,10 +13,10 @@ async function main() {
     12
   );
   const admin = await prisma.user.upsert({
-    where: { email: process.env.ADMIN_EMAIL || "admin@freemic.co.kr" },
+    where: { email: process.env.ADMIN_EMAIL || "admin@voit.co.kr" },
     update: {},
     create: {
-      email: process.env.ADMIN_EMAIL || "admin@freemic.co.kr",
+      email: process.env.ADMIN_EMAIL || "admin@voit.co.kr",
       name: "관리자",
       password_hash: adminPassword,
       user_type: UserType.admin,
@@ -27,10 +28,10 @@ async function main() {
   // ── 고객 계정 ──────────────────────────────────────────────
   const customerPassword = await bcrypt.hash("Customer1234!", 12);
   const customer = await prisma.user.upsert({
-    where: { email: "customer@freemic.co.kr" },
+    where: { email: "customer@voit.co.kr" },
     update: {},
     create: {
-      email: "customer@freemic.co.kr",
+      email: "customer@voit.co.kr",
       name: "김고객",
       password_hash: customerPassword,
       user_type: UserType.customer,
@@ -50,10 +51,10 @@ async function main() {
   // ── 프리랜서 계정 1 (승인 완료) ────────────────────────────
   const freelancerPassword = await bcrypt.hash("Freelancer1234!", 12);
   const freelancer1 = await prisma.user.upsert({
-    where: { email: "mc.park@freemic.co.kr" },
+    where: { email: "mc.park@voit.co.kr" },
     update: {},
     create: {
-      email: "mc.park@freemic.co.kr",
+      email: "mc.park@voit.co.kr",
       name: "박진행",
       password_hash: freelancerPassword,
       user_type: UserType.freelancer,
@@ -118,10 +119,10 @@ async function main() {
 
   // ── 프리랜서 계정 2 (검수 대기) ─────────────────────────────
   const freelancer2 = await prisma.user.upsert({
-    where: { email: "host.lee@freemic.co.kr" },
+    where: { email: "host.lee@voit.co.kr" },
     update: {},
     create: {
-      email: "host.lee@freemic.co.kr",
+      email: "host.lee@voit.co.kr",
       name: "이쇼호스트",
       password_hash: freelancerPassword,
       user_type: UserType.freelancer,
@@ -230,10 +231,10 @@ async function main() {
 
   console.log("\n🎉 Seed 완료!");
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("관리자   | admin@freemic.co.kr    | Admin1234!");
-  console.log("고객     | customer@freemic.co.kr | Customer1234!");
-  console.log("프리랜서 | mc.park@freemic.co.kr  | Freelancer1234!");
-  console.log("프리랜서 | host.lee@freemic.co.kr | Freelancer1234!");
+  console.log("관리자   | admin@voit.co.kr    | Admin1234!");
+  console.log("고객     | customer@voit.co.kr | Customer1234!");
+  console.log("프리랜서 | mc.park@voit.co.kr  | Freelancer1234!");
+  console.log("프리랜서 | host.lee@voit.co.kr | Freelancer1234!");
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 
