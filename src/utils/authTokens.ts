@@ -26,7 +26,7 @@ const parseDurationMs = (value: string, fallbackMs: number): number => {
 const cookieBaseOptions = {
   httpOnly: true,
   secure: isProduction,
-  sameSite: "lax" as const,
+  sameSite: isProduction ? ("none" as const) : ("lax" as const),
   path: "/",
 };
 

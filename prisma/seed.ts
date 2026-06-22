@@ -59,6 +59,13 @@ type FreelancerSeed = {
   };
 };
 
+type ReviewCustomerSeed = {
+  name: string;
+  companyName: string;
+  department: string;
+  managerName?: string;
+};
+
 const FREELANCERS: FreelancerSeed[] = [
   {
     email: "mc.shin@voit.co.kr",
@@ -974,7 +981,7 @@ async function seedUsers() {
     },
   });
 
-  return { admin, customer };
+  return { admin, customer, customerHash };
 }
 
 async function seedFreelancer(f: FreelancerSeed, passwordHash: string) {
@@ -1119,33 +1126,235 @@ const VENUE_VARIANTS = [
   "강남 컨퍼런스홀",
 ];
 
-const REVIEW_COMMENT_VARIANTS = [
-  "사전 미팅에서 행사 목적을 빠르게 이해했고, 현장에서도 흐름을 안정적으로 이끌어주었습니다.",
-  "진행 톤이 행사 성격과 잘 맞았습니다. 대본 수정 요청도 빠르게 반영해주어 준비 과정이 편했습니다.",
-  "시간 관리가 정확했고 순서 전환이 자연스러웠습니다. 참석자 반응도 매우 좋았습니다.",
-  "발성과 전달력이 좋아 큰 공간에서도 안내 멘트가 또렷하게 전달되었습니다.",
-  "갑작스러운 순서 변경이 있었는데 당황하지 않고 매끄럽게 연결해주었습니다.",
-  "행사 전 자료를 꼼꼼히 확인해주어 현장 운영팀 입장에서 믿고 맡길 수 있었습니다.",
-  "격식은 지키면서도 분위기가 딱딱해지지 않게 조율해주었습니다.",
-  "브랜드 메시지를 잘 이해하고 자연스럽게 멘트에 녹여주었습니다.",
-  "참석자 안내, 귀빈 소개, 클로징까지 전체 완성도가 높았습니다.",
-  "다음 행사에서도 다시 섭외하고 싶을 만큼 커뮤니케이션과 현장 대응이 좋았습니다.",
-  "현장 스태프와의 호흡이 좋았고 리허설 때 발견한 문제도 침착하게 정리해주었습니다.",
-  "대본 숙지도가 높아 진행이 끊기지 않았고, 목소리 톤도 행사 분위기에 잘 맞았습니다.",
+const REVIEW_CUSTOMERS: ReviewCustomerSeed[] = [
+  { name: "김민지", companyName: "넥스트브릿지", department: "브랜드전략팀" },
+  { name: "박서준", companyName: "라움컴퍼니", department: "행사기획팀" },
+  { name: "이하늘", companyName: "모먼트랩", department: "콘텐츠마케팅팀" },
+  { name: "최유진", companyName: "스테이지온", department: "MICE사업부" },
+  { name: "정도윤", companyName: "그로스파트너스", department: "커뮤니케이션팀" },
+  { name: "한지우", companyName: "웨이브커머스", department: "라이브커머스팀" },
+  { name: "오세린", companyName: "블루픽쳐스", department: "제작운영팀" },
+  { name: "윤태현", companyName: "아젠다포럼", department: "컨퍼런스운영팀" },
+  { name: "강나래", companyName: "베뉴플러스", department: "웨딩사업부" },
+  { name: "서지훈", companyName: "브랜드와이", department: "PR팀" },
+  { name: "문채원", companyName: "서울에듀재단", department: "대외협력팀" },
+  { name: "임수아", companyName: "포커스엠", department: "프로젝트운영팀" },
+  { name: "노은서", companyName: "루미나스코리아", department: "마케팅팀" },
+  { name: "장현우", companyName: "온더스테이지", department: "공연기획팀" },
+  { name: "배지민", companyName: "하이브리드이벤트", department: "행사운영팀" },
+  { name: "유다은", companyName: "브릿지컨설팅", department: "교육사업팀" },
+  { name: "송민규", companyName: "핀포인트랩", department: "IR커뮤니케이션팀" },
+  { name: "신예린", companyName: "메리앤코", department: "웨딩플래닝팀" },
+  { name: "권도현", companyName: "어반커넥트", department: "파트너십팀" },
+  { name: "홍서연", companyName: "클래스온", department: "세미나운영팀" },
+  { name: "남지호", companyName: "엠플러스", department: "홍보팀" },
+  { name: "차은별", companyName: "브랜드오브", department: "브랜드경험팀" },
+  { name: "백승민", companyName: "코어이벤트", department: "제작관리팀" },
+  { name: "전하린", companyName: "마이스링크", department: "국제회의팀" },
+  { name: "안재윤", companyName: "오프닝랩", department: "프로그램팀" },
+  { name: "고서희", companyName: "더세레모니", department: "웨딩운영팀" },
+  { name: "하준영", companyName: "캠퍼스포럼", department: "대학행사팀" },
+  { name: "류아인", companyName: "비욘드커머스", department: "라이브기획팀" },
+  { name: "민채린", companyName: "브랜드무드", department: "콘텐츠팀" },
+  { name: "주성민", companyName: "임팩트홀딩스", department: "사내문화팀" },
+  { name: "양소율", companyName: "스피치앤무브", department: "교육운영팀" },
+  { name: "허지안", companyName: "시티컨벤션", department: "행사섭외팀" },
+  { name: "길도영", companyName: "퓨처데모", department: "스타트업지원팀" },
+  { name: "원서진", companyName: "화이트데이즈", department: "웨딩콘텐츠팀" },
+  { name: "표나윤", companyName: "아트앤피플", department: "문화사업팀" },
+  { name: "석민호", companyName: "테크노트", department: "제품마케팅팀" },
+  { name: "나유림", companyName: "글로벌MICE", department: "해외사업팀" },
+  { name: "도윤서", companyName: "데일리브랜드", department: "캠페인팀" },
+  { name: "마지훈", companyName: "그랜드베뉴", department: "VIP행사팀" },
+  { name: "서하린", companyName: "플랜비웨딩", department: "본식운영팀" },
+  { name: "이주원", companyName: "넥스트에듀", department: "입학행사팀" },
+  { name: "박하경", companyName: "라이브픽", department: "스튜디오운영팀" },
+  { name: "김태린", companyName: "파인포럼", department: "정책행사팀" },
+  { name: "최시윤", companyName: "브랜드플로우", department: "론칭TF" },
+  { name: "정예준", companyName: "인사이트파트너", department: "네트워킹팀" },
+  { name: "한소미", companyName: "모던클래식", department: "의전운영팀" },
+  { name: "오준서", companyName: "스케일업센터", department: "액셀러레이팅팀" },
+  { name: "강예나", companyName: "커넥트홀", department: "고객경험팀" },
 ];
 
-const FREELANCER_REVIEW_VARIANTS = [
-  "요청사항이 명확했고 일정과 피드백이 빨라 원활하게 진행할 수 있었습니다.",
-  "행사 자료가 잘 정리되어 있어 준비가 수월했습니다. 다시 함께하고 싶은 고객입니다.",
-  "현장 스태프와 담당자의 소통이 좋았고 결제 및 정산 안내도 명확했습니다.",
-  "리허설 시간이 충분히 확보되어 완성도 있게 준비할 수 있었습니다.",
-  "행사 목적과 기대 톤을 구체적으로 전달해주어 진행 방향을 잡기 쉬웠습니다.",
+const REVIEW_OPENINGS = [
+  "사전 미팅에서 행사 목적을 빠르게 이해해주셔서 준비 과정이 훨씬 수월했습니다.",
+  "큐시트와 대본을 꼼꼼히 확인한 뒤 필요한 수정 포인트를 먼저 제안해주셨습니다.",
+  "현장 도착부터 리허설까지 일정 관리가 정확해서 운영팀 입장에서 안심이 됐습니다.",
+  "처음 상담 때부터 응답이 빠르고, 행사 성격에 맞는 톤을 구체적으로 잡아주셨습니다.",
+  "자료 전달 후 이해 속도가 빨라 별도 설명을 많이 하지 않아도 진행 방향이 잘 맞았습니다.",
+  "리허설에서 동선과 마이크 체크를 세심하게 봐주셔서 본 행사 완성도가 높아졌습니다.",
+  "담당자, 음향팀, 현장 스태프와의 소통이 부드러워 전체 운영 흐름이 좋았습니다.",
+  "행사 직전 변경사항이 있었는데도 침착하게 반영해주셔서 큰 도움이 됐습니다.",
 ];
+
+const REVIEW_DETAILS = [
+  "순서 전환 멘트가 자연스러웠고 참석자들이 집중력을 잃지 않도록 흐름을 잘 잡아주셨습니다.",
+  "발성과 전달력이 좋아 넓은 공간에서도 안내 멘트가 또렷하게 들렸다는 피드백이 많았습니다.",
+  "브랜드 메시지를 과하게 드러내지 않으면서도 핵심 키워드를 적절히 살려주셨습니다.",
+  "귀빈 소개와 시상 순서처럼 실수가 나기 쉬운 구간도 차분하게 처리해주셨습니다.",
+  "참석자 반응을 보면서 멘트 길이를 조절하는 감각이 좋아 현장 분위기가 자연스러웠습니다.",
+  "예상보다 빠르게 진행된 구간에서는 애드리브로 시간을 안정적으로 맞춰주셨습니다.",
+  "대본 숙지도가 높아 프롬프터에만 의존하지 않고 시선 처리까지 안정적이었습니다.",
+  "행사 콘셉트와 관객층에 맞춰 너무 딱딱하지도 가볍지도 않은 톤을 유지해주셨습니다.",
+];
+
+const REVIEW_CLOSINGS = [
+  "다음에도 비슷한 행사가 있으면 우선적으로 다시 문의드리고 싶습니다.",
+  "내부 만족도도 높아서 행사 후 담당자 회의에서 좋은 평가를 받았습니다.",
+  "가격 대비 만족도가 높고, 준비 과정까지 포함해 전반적으로 추천할 만합니다.",
+  "현장 변수 대응까지 믿고 맡길 수 있는 진행자라는 인상을 받았습니다.",
+  "참석자 피드백이 좋아서 같은 포맷의 다음 행사에도 잘 맞을 것 같습니다.",
+  "준비부터 마무리까지 책임감 있게 챙겨주셔서 만족스러웠습니다.",
+];
+
+const CATEGORY_REVIEW_DETAILS: Record<string, string[]> = {
+  "웨딩 사회자": [
+    "신랑신부 인터뷰 내용을 과하지 않게 녹여주셔서 본식 분위기가 따뜻했습니다.",
+    "양가 부모님 소개와 축사 전환이 정중했고, 하객 안내도 매끄러웠습니다.",
+  ],
+  "쇼호스트": [
+    "제품 USP를 빠르게 파악하고 댓글 반응에 맞춘 멘트 전환이 좋았습니다.",
+    "판매 포인트를 자연스럽게 반복해주셔서 방송 흐름과 전환율 모두 만족스러웠습니다.",
+  ],
+  "라이브커머스": [
+    "실시간 채팅 흐름을 놓치지 않고 구매 포인트로 자연스럽게 연결해주셨습니다.",
+    "상품 설명과 이벤트 안내가 명확해 방송 운영팀이 편하게 진행할 수 있었습니다.",
+  ],
+  "공공기관 행사": [
+    "의전 기준을 잘 이해하고 있어 귀빈 소개와 공식 멘트가 안정적이었습니다.",
+    "격식 있는 자리였는데도 분위기가 과하게 무겁지 않도록 균형을 잘 잡아주셨습니다.",
+  ],
+  "컨퍼런스 MC": [
+    "세션 사이 전환과 발표자 소개가 정확해서 전체 프로그램 흐름이 깔끔했습니다.",
+    "패널토론 전후로 핵심 메시지를 정리해주는 멘트가 특히 좋았습니다.",
+  ],
+  "기업행사 MC": [
+    "임직원 대상 행사에 맞게 친근함과 공식적인 톤의 균형을 잘 맞춰주셨습니다.",
+    "시상식과 네트워킹 순서 사이 분위기 전환을 안정적으로 이끌어주셨습니다.",
+  ],
+  "아나운서": [
+    "딕션이 명확하고 문장 호흡이 좋아 공식 안내 멘트의 신뢰감이 높았습니다.",
+    "카메라 앞 진행에서도 시선과 톤이 자연스러워 결과물 완성도가 좋았습니다.",
+  ],
+};
+
+const FREELANCER_REVIEW_OPENINGS = [
+  "요청사항이 명확했고 자료 전달이 빨라 준비가 수월했습니다.",
+  "담당자 피드백이 구체적이라 행사 톤을 잡기 쉬웠습니다.",
+  "리허설 시간이 충분히 확보되어 현장 변수를 미리 줄일 수 있었습니다.",
+  "정산 조건과 일정 안내가 명확해서 안심하고 진행할 수 있었습니다.",
+  "현장 스태프와 담당자의 커뮤니케이션이 좋아 진행 흐름이 매끄러웠습니다.",
+];
+
+const FREELANCER_REVIEW_CLOSINGS = [
+  "다시 함께하고 싶은 고객입니다.",
+  "다음 프로젝트에서도 좋은 결과를 만들 수 있을 것 같습니다.",
+  "전반적으로 신뢰감 있게 협업할 수 있었습니다.",
+  "준비 과정부터 행사 종료까지 좋은 협업이었습니다.",
+  "일정과 역할 분담이 분명해 만족스러운 프로젝트였습니다.",
+];
+
+function stableIndex(seed: string, modulo: number): number {
+  let hash = 0;
+  for (const char of seed) {
+    hash = (hash * 31 + char.charCodeAt(0)) % 2147483647;
+  }
+  return Math.abs(hash) % modulo;
+}
+
+function getReviewCustomerSeed(slug: string, index: number): ReviewCustomerSeed {
+  const base = REVIEW_CUSTOMERS[stableIndex(`${slug}-${index}`, REVIEW_CUSTOMERS.length)];
+  return {
+    ...base,
+    managerName: base.managerName ?? base.name,
+  };
+}
+
+function makeReviewerPhone(slug: string, index: number): string {
+  const a = String(2000 + stableIndex(`${slug}-a-${index}`, 7000)).padStart(4, "0");
+  const b = String(1000 + stableIndex(`${slug}-b-${index}`, 8000)).padStart(4, "0");
+  return `010-${a}-${b}`;
+}
+
+function makeReviewComment(
+  f: FreelancerSeed,
+  eventTitle: string,
+  venue: string,
+  index: number,
+  totalScore: number,
+): string {
+  const category = f.categories.find((item) => CATEGORY_REVIEW_DETAILS[item]);
+  const categoryDetails = category ? CATEGORY_REVIEW_DETAILS[category] : undefined;
+  const opening = REVIEW_OPENINGS[stableIndex(`${f.profileId}-opening-${index}`, REVIEW_OPENINGS.length)];
+  const detailPool = categoryDetails?.length ? categoryDetails : REVIEW_DETAILS;
+  const detail = detailPool[stableIndex(`${f.profileId}-detail-${eventTitle}-${index}`, detailPool.length)];
+  const closing = REVIEW_CLOSINGS[stableIndex(`${f.profileId}-closing-${venue}-${index}`, REVIEW_CLOSINGS.length)];
+  const scoreNote = totalScore >= 4.9
+    ? "완성도가 기대 이상이었습니다."
+    : totalScore >= 4.7
+      ? "전체적으로 안정적인 진행이었습니다."
+      : "필요한 부분을 성실하게 맞춰주셨습니다.";
+
+  return `${opening} ${detail} ${scoreNote} ${closing}`;
+}
+
+function makeFreelancerReviewComment(
+  customerName: string,
+  eventTitle: string,
+  index: number,
+): string {
+  const opening = FREELANCER_REVIEW_OPENINGS[stableIndex(`${customerName}-${eventTitle}-${index}`, FREELANCER_REVIEW_OPENINGS.length)];
+  const closing = FREELANCER_REVIEW_CLOSINGS[stableIndex(`${eventTitle}-${customerName}-${index}`, FREELANCER_REVIEW_CLOSINGS.length)];
+  return `${opening} ${closing}`;
+}
+
+async function ensureSeedReviewCustomer(
+  slug: string,
+  index: number,
+  passwordHash: string,
+) {
+  const reviewer = getReviewCustomerSeed(slug, index);
+  const paddedIndex = pad(index);
+  const id = `seed_review_customer_${slug}_${paddedIndex}`;
+  const email = `reviewer.${slug}.${paddedIndex}@voit.local`;
+
+  const user = await upsertUser({
+    id,
+    email,
+    name: reviewer.name,
+    phone: makeReviewerPhone(slug, index),
+    userType: UserType.customer,
+    passwordHash,
+  });
+
+  await prisma.customerProfile.upsert({
+    where: { user_id: user.id },
+    update: {
+      customer_type: "company",
+      company_name: reviewer.companyName,
+      department: reviewer.department,
+      manager_name: reviewer.managerName,
+      memo: "시연용 공개 후기 작성자 계정입니다.",
+    },
+    create: {
+      id: `seed_review_customer_profile_${slug}_${paddedIndex}`,
+      user_id: user.id,
+      customer_type: "company",
+      company_name: reviewer.companyName,
+      department: reviewer.department,
+      manager_name: reviewer.managerName,
+      memo: "시연용 공개 후기 작성자 계정입니다.",
+    },
+  });
+
+  return user;
+}
 
 async function seedCompletedReviews(
-  customerId: string,
   profileId: string,
   f: FreelancerSeed,
+  reviewerPasswordHash: string,
 ) {
   const slug = getSeedSlug(f);
   const createdScores: number[] = [];
@@ -1188,6 +1397,21 @@ async function seedCompletedReviews(
     const chatRoomId = `seed_chat_room_${slug}_${pad(index)}`;
     const chatMessageId = `seed_chat_message_${slug}_${pad(index)}`;
     const offerId = `seed_offer_${slug}_${pad(index)}`;
+    const reviewCustomer = await ensureSeedReviewCustomer(
+      slug,
+      index,
+      reviewerPasswordHash,
+    );
+    const customerId = reviewCustomer.id;
+    const reviewComment =
+      i === 0
+        ? f.review.comment
+        : makeReviewComment(f, eventTitle, venue, i, totalScore);
+    const freelancerReviewComment = makeFreelancerReviewComment(
+      reviewCustomer.name,
+      eventTitle,
+      i,
+    );
 
     const booking = await prisma.booking.upsert({
       where: { id: bookingId },
@@ -1367,10 +1591,7 @@ async function seedCompletedReviews(
         communication_score: communication,
         total_score: totalScore,
         rehire_intent: totalScore >= 4.5,
-        comment:
-          i === 0
-            ? f.review.comment
-            : REVIEW_COMMENT_VARIANTS[i % REVIEW_COMMENT_VARIANTS.length],
+        comment: reviewComment,
         status: ReviewStatus.published,
       },
       create: {
@@ -1387,10 +1608,7 @@ async function seedCompletedReviews(
         communication_score: communication,
         total_score: totalScore,
         rehire_intent: totalScore >= 4.5,
-        comment:
-          i === 0
-            ? f.review.comment
-            : REVIEW_COMMENT_VARIANTS[i % REVIEW_COMMENT_VARIANTS.length],
+        comment: reviewComment,
         status: ReviewStatus.published,
       },
     });
@@ -1406,8 +1624,7 @@ async function seedCompletedReviews(
         respect_score: 5,
         total_score: i % 4 === 0 ? 4.8 : 5,
         would_work_again: true,
-        comment:
-          FREELANCER_REVIEW_VARIANTS[i % FREELANCER_REVIEW_VARIANTS.length],
+        comment: freelancerReviewComment,
         status: ReviewStatus.published,
       },
       create: {
@@ -1421,8 +1638,7 @@ async function seedCompletedReviews(
         respect_score: 5,
         total_score: i % 4 === 0 ? 4.8 : 5,
         would_work_again: true,
-        comment:
-          FREELANCER_REVIEW_VARIANTS[i % FREELANCER_REVIEW_VARIANTS.length],
+        comment: freelancerReviewComment,
         status: ReviewStatus.published,
       },
     });
@@ -1650,8 +1866,8 @@ async function seedRequestsAndRecommendations(
 }
 
 async function main() {
-  console.log("🌱 Voit 20명 시연용 seed 데이터 생성 시작(v6 / 후기 47개)...");
-  console.log("- 구성: 프리랜서 19명 + 고용인 1명");
+  console.log("🌱 Voit 시연용 seed 데이터 생성 시작(v7 / 후기 작성자 다양화 / 후기 47개)...");
+  console.log("- 구성: 프리랜서 19명 + 시연용 고용인 1명 + 공개 후기용 의뢰인 계정");
   console.log(
     "- 영상/유튜브 링크는 생성하지 않습니다. 직접 제작한 링크를 나중에 등록하세요.",
   );
@@ -1662,7 +1878,7 @@ async function main() {
   await cleanupPreviousSeedData();
 
   const freelancerHash = await bcrypt.hash(PASSWORDS.freelancer, 12);
-  const { admin, customer } = await seedUsers();
+  const { admin, customer, customerHash } = await seedUsers();
 
   const profilesByDisplayName: Record<string, string> = {};
 
@@ -1670,9 +1886,9 @@ async function main() {
     const { profile } = await seedFreelancer(freelancer, freelancerHash);
     profilesByDisplayName[freelancer.displayName] = profile.id;
     const stats = await seedCompletedReviews(
-      customer.id,
       profile.id,
       freelancer,
+      customerHash,
     );
     console.log(
       `✅ 진행자 생성: ${freelancer.displayName} / 후기 ${stats.reviewCount}개 / 평균 ${stats.avgRating}`,

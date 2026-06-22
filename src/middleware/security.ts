@@ -2,12 +2,23 @@ import { NextFunction, Request, Response } from "express";
 import { errorResponse } from "../utils/response";
 import { isAllowedClientOrigin } from "../utils/origins";
 
-const AUTH_COOKIE_NAMES = ["access_token", "refresh_token"];
+const AUTH_COOKIE_NAMES = new Set(["access_token", "refresh_token"]);
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+const getCookieNames = (cookieHeader: string | undefined): Set<string> => {
+  if (!cookieHeader) return new Set();
+
+  return new Set(
+    cookieHeader
+      .split(";")
+      .map((part) => part.trim().split("=")[0]?.trim())
+      .filter((name): name is string => Boolean(name))
+  );
+};
+
 const requestHasAuthCookie = (cookieHeader: string | undefined): boolean => {
-  if (!cookieHeader) return false;
-  return AUTH_COOKIE_NAMES.some((cookieName) => cookieHeader.includes(`${cookieName}=`));
+  const cookieNames = getCookieNames(cookieHeader);
+  return Array.from(AUTH_COOKIE_NAMES).some((cookieName) => cookieNames.has(cookieName));
 };
 
 export const verifyTrustedOrigin = () => {
