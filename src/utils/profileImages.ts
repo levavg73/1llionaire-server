@@ -3,6 +3,17 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 export const PROFILE_IMAGE_MAX_SIZE = 5 * 1024 * 1024;
 export const PROFILE_IMAGE_BUCKET = process.env.SUPABASE_PROFILE_IMAGE_BUCKET ?? "profile-images";
 export const PROFILE_IMAGE_SIGNED_URL_EXPIRES_IN = 60 * 60;
+const PROFILE_IMAGE_SIGNED_URL_CACHE_TTL_MS = Math.max(
+  (PROFILE_IMAGE_SIGNED_URL_EXPIRES_IN - 60) * 1000,
+  0
+);
+
+type SignedUrlCacheEntry = {
+  url: string | null;
+  expiresAt: number;
+};
+
+const signedUrlCache = new Map<string, SignedUrlCacheEntry>();
 
 let supabaseAdminClient: SupabaseClient | null = null;
 
@@ -48,6 +59,11 @@ export function getSupabaseAdminClient() {
 export async function createProfileImageSignedUrl(path?: string | null) {
   if (!path || !isSafeProfileImagePath(path)) return null;
 
+  const cached = signedUrlCache.get(path);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.url;
+  }
+
   try {
     const { data, error } = await getSupabaseAdminClient()
       .storage
@@ -56,12 +72,25 @@ export async function createProfileImageSignedUrl(path?: string | null) {
 
     if (error) {
       console.error("[supabase-profile-image-signed-url-error]", error);
+      signedUrlCache.set(path, {
+        url: null,
+        expiresAt: Date.now() + 60 * 1000,
+      });
       return null;
     }
+
+    signedUrlCache.set(path, {
+      url: data.signedUrl,
+      expiresAt: Date.now() + PROFILE_IMAGE_SIGNED_URL_CACHE_TTL_MS,
+    });
 
     return data.signedUrl;
   } catch (err) {
     console.error("[supabase-profile-image-signed-url-config-error]", err);
+    signedUrlCache.set(path, {
+      url: null,
+      expiresAt: Date.now() + 60 * 1000,
+    });
     return null;
   }
 }

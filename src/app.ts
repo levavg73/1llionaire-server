@@ -9,6 +9,7 @@ import authRoutes from "./routes/auth";
 import oauthRoutes from "./routes/oauth";
 import usersRoutes from "./routes/users";
 import customerRoutes from "./routes/customer";
+import customerSavedRoutes from "./routes/customer-saved";
 import freelancerRoutes from "./routes/freelancer";
 import publicRoutes from "./routes/public";
 import bookingRoutes from "./routes/bookings";
@@ -144,6 +145,7 @@ app.use("/api/users", usersRoutes);
 
 // 서비스 라우트
 app.use("/api/customer/requests", customerRoutes);
+app.use("/api/customer/saved-freelancers", customerSavedRoutes);
 app.use("/api/freelancer", freelancerRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/reviews", reviewRoutes);
