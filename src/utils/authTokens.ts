@@ -26,7 +26,7 @@ const parseDurationMs = (value: string, fallbackMs: number): number => {
 const cookieBaseOptions = {
   httpOnly: true,
   secure: isProduction,
-  sameSite: isProduction ? "none" as const : "lax" as const,
+  sameSite: "lax" as const,
   path: "/",
 };
 
@@ -90,6 +90,7 @@ export const setAuthCookies = async (
     ...cookieBaseOptions,
     maxAge: parseDurationMs(env.JWT_EXPIRES_IN, 15 * 60 * 1000),
   });
+
   res.cookie(REFRESH_TOKEN_COOKIE, refreshToken, {
     ...cookieBaseOptions,
     maxAge: parseDurationMs(env.JWT_REFRESH_EXPIRES_IN, 30 * 24 * 60 * 60 * 1000),
