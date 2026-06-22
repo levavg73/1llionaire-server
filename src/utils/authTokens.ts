@@ -23,10 +23,18 @@ const parseDurationMs = (value: string, fallbackMs: number): number => {
   return amount * unitMs[unit];
 };
 
+const getCookieSameSite = (): "lax" | "strict" | "none" => {
+  if (env.AUTH_COOKIE_SAME_SITE) return env.AUTH_COOKIE_SAME_SITE;
+
+  // The client now calls the API through its own /api rewrite in production,
+  // so auth cookies can stay first-party and avoid third-party-cookie issues.
+  return "lax";
+};
+
 const cookieBaseOptions = {
   httpOnly: true,
   secure: isProduction,
-  sameSite: isProduction ? ("none" as const) : ("lax" as const),
+  sameSite: getCookieSameSite(),
   path: "/",
 };
 

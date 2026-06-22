@@ -9,6 +9,7 @@ const envSchema = z.object({
   JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
   JWT_EXPIRES_IN: z.string().default("15m"),
   JWT_REFRESH_EXPIRES_IN: z.string().default("30d"),
+  AUTH_COOKIE_SAME_SITE: z.enum(["lax", "strict", "none"]).optional(),
 
   // ─── 서버 ─────────────────────────────────────────────────
   PORT: z.coerce.number().int().positive().default(4000),
@@ -57,6 +58,8 @@ const envSchema = z.object({
 
   // ─── AI (Google Gemini) ───────────────────────────────────
   GEMINI_API_KEY: z.string().optional(),
+  // Optional alias for platforms or local setups that already use GOOGLE_API_KEY
+  GOOGLE_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().default("gemini-2.5-flash"),
 
   // ─── 에스크로 자동 릴리즈 (행사 완료 후 N일) ───────────────
@@ -83,8 +86,9 @@ export function requireTossKeys(): { secretKey: string; clientKey: string } {
 
 // AI 키 런타임 검증 헬퍼 (ai.ts에서 호출)
 export function requireGeminiKey(): string {
-  if (!env.GEMINI_API_KEY) {
+  const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
+  if (!apiKey) {
     throw new Error("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.");
   }
-  return env.GEMINI_API_KEY;
+  return apiKey;
 }
