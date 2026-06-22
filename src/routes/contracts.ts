@@ -197,12 +197,12 @@ router.post(
         );
       }
 
-      // 계약서는 confirmed 이상 상태에서만 생성
-      if (!["confirmed", "completed"].includes(booking.booking_status)) {
+      // 계약서는 결제 대기 단계부터 생성 가능
+      if (!["payment_pending", "confirmed", "completion_requested", "completed"].includes(booking.booking_status)) {
         return errorResponse(
           res,
           "CONFLICT",
-          "예약 확정 후에 계약서를 생성할 수 있습니다.",
+          "결제 대기 또는 예약 확정 후에 계약서를 생성할 수 있습니다.",
           [],
           409
         );

@@ -253,22 +253,31 @@ function buildRecommendationReason(scored: CandidateScore) {
   const displayName = scored.candidate.display_name || "해당 진행자";
 
   if (primaryReasons.length === 0) {
-    return `AI 데이터 매칭 결과, ${displayName}님이 요청 조건과 잘 맞는 후보로 추천되었습니다.`;
+    return `조건 기반 매칭 결과, ${displayName}님이 요청 조건과 잘 맞는 후보로 추천되었습니다.`;
   }
 
-  return `AI 데이터 매칭 결과, ${primaryReasons.join(" · ")} 기준으로 ${displayName}님이 요청 조건과 잘 맞습니다.`;
+  return `조건 기반 매칭 결과, ${primaryReasons.join(" · ")} 기준으로 ${displayName}님이 요청 조건과 잘 맞습니다.`;
 }
 
 export async function generateAiRecommendationsForRequest(params: {
   tx: Prisma.TransactionClient;
   request: RequestForMatching;
   recommendedByUserId: string;
+  excludedFreelancerIds?: string[];
+  startingDisplayOrder?: number;
 }) {
-  const { tx, request, recommendedByUserId } = params;
+  const {
+    tx,
+    request,
+    recommendedByUserId,
+    excludedFreelancerIds = [],
+    startingDisplayOrder = 1,
+  } = params;
 
   const candidates = await tx.freelancerProfile.findMany({
     where: {
       status: "approved",
+      ...(excludedFreelancerIds.length > 0 && { id: { notIn: excludedFreelancerIds } }),
     },
     select: {
       id: true,
@@ -321,15 +330,15 @@ export async function generateAiRecommendationsForRequest(params: {
       freelancer_id: item.candidate.id,
       recommended_by: recommendedByUserId,
       recommendation_reason: buildRecommendationReason(item),
-      display_order: index + 1,
-      status: "sent",
+      display_order: startingDisplayOrder + index,
+      status: "draft",
     })),
     skipDuplicates: true,
   });
 
   const updatedRequest = await tx.eventRequest.update({
     where: { id: request.id },
-    data: { status: "recommended" },
+    data: { status: "recommending" },
   });
 
   return {

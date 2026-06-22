@@ -70,6 +70,15 @@ async function getBookingForUser(bookingId: string, user: AuthPayload) {
       offers: { orderBy: { created_at: "desc" }, take: 5 },
       quote: true,
       reviews: true,
+      contract: {
+        select: {
+          id: true,
+          status: true,
+          customer_signed_at: true,
+          freelancer_signed_at: true,
+          fully_signed_at: true,
+        },
+      },
     },
   });
 
@@ -369,6 +378,15 @@ router.get("/", authenticate, async (req: AuthRequest, res: Response, next: Next
           },
           chat_room: true,
           offers: { orderBy: { created_at: "desc" }, take: 3 },
+          contract: {
+            select: {
+              id: true,
+              status: true,
+              customer_signed_at: true,
+              freelancer_signed_at: true,
+              fully_signed_at: true,
+            },
+          },
         },
       }),
       prisma.booking.count({ where }),

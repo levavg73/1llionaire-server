@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "postinstall": "prisma generate",
-    "build": "prisma generate",
+    "build": "prisma generate && tsc",
+    "vercel-build": "prisma generate && tsc --noEmit",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"src/**/*.ts\"",

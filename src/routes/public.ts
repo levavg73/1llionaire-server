@@ -69,20 +69,35 @@ router.get(
       const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>);
       const { category, region, language, min_price, max_price, q, sort } = freelancerListQuerySchema.parse(req.query);
 
-      const where: Prisma.FreelancerProfileWhereInput = {
-        status: "approved",
-        ...getCategoryWhere(category),
-        ...(region && { region: String(region) }),
-        ...(language && { languages: { has: String(language) } }),
-        ...(min_price !== undefined && { base_price_max: { gte: min_price } }),
-        ...(max_price !== undefined && { base_price_min: { lte: max_price } }),
-        ...(q && {
+      const andFilters: Prisma.FreelancerProfileWhereInput[] = [];
+
+      if (region) {
+        andFilters.push({
+          OR: [
+            { region: String(region) },
+            { available_regions: { has: String(region) } },
+            { available_regions: { has: "전국" } },
+          ],
+        });
+      }
+
+      if (q) {
+        andFilters.push({
           OR: [
             { display_name: { contains: q, mode: "insensitive" } },
             { headline: { contains: q, mode: "insensitive" } },
             { bio: { contains: q, mode: "insensitive" } },
           ],
-        }),
+        });
+      }
+
+      const where: Prisma.FreelancerProfileWhereInput = {
+        status: "approved",
+        ...getCategoryWhere(category),
+        ...(language && { languages: { has: String(language) } }),
+        ...(min_price !== undefined && { base_price_max: { gte: min_price } }),
+        ...(max_price !== undefined && { base_price_min: { lte: max_price } }),
+        ...(andFilters.length > 0 && { AND: andFilters }),
       };
 
       const [items, total] = await Promise.all([

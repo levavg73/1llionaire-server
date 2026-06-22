@@ -289,9 +289,20 @@ router.patch("/requests/:id/status", async (req: AuthRequest, res: Response, nex
       );
     }
 
-    const updated = await prisma.eventRequest.update({
-      where: { id: req.params.id },
-      data: { status },
+    const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const changed = await tx.eventRequest.update({
+        where: { id: req.params.id },
+        data: { status },
+      });
+
+      if (status === "recommended") {
+        await tx.recommendation.updateMany({
+          where: { request_id: req.params.id, status: "draft" },
+          data: { status: "sent" },
+        });
+      }
+
+      return changed;
     });
 
     console.info("[request-status-change]", {

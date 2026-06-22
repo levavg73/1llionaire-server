@@ -1,7 +1,7 @@
 import { env } from "../config/env";
 
 const CLIENT_PREVIEW_ORIGIN_PATTERN =
-  /^https:\/\/1llionaire-client-[a-z0-9-]+-seori-s-projects\.vercel\.app$/i;
+  /^https:\/\/voit-client-[a-z0-9-]+-seori-s-projects\.vercel\.app$/i;
 
 const normalizeOrigin = (value: string): string => new URL(value).origin;
 

@@ -1,4 +1,4 @@
--- FreeMic Supabase/Postgres initialization SQL
+-- Voit Supabase/Postgres initialization SQL
 -- Generated from prisma/schema.prisma for initial Supabase SQL Editor setup.
 -- Important:
 -- 1) Prefer Prisma migrations as the source of truth: `pnpm prisma migrate deploy`.

@@ -17,6 +17,7 @@ import {
   optionalShortText,
   optionalStringArray,
   requiredHttpsUrl,
+  requiredStringArray,
 } from "../utils/validation";
 import {
   PROFILE_IMAGE_BUCKET,
@@ -137,9 +138,9 @@ const profileSchema = z
     headline: z.string().trim().min(1, "한 줄 소개를 입력해 주세요.").max(150),
     bio: z.string().trim().min(1, "자기소개를 입력해 주세요.").max(2000),
     region: z.string().trim().min(1, "활동 지역을 입력해 주세요.").max(100),
-    available_regions: optionalStringArray(30, 50),
-    categories: optionalStringArray(20, 50),
-    styles: optionalStringArray(20, 50),
+    available_regions: requiredStringArray(30, 50),
+    categories: requiredStringArray(20, 50),
+    styles: requiredStringArray(20, 50),
     career_years: z.number().int().min(0).max(50).optional(),
     base_price_min: z
       .number({ required_error: "최소 가격을 입력해 주세요." })

@@ -38,6 +38,7 @@ const requestBaseSchema = z.object({
   budget_max: z.number().int().positive().optional(),
   preferred_freelancer_type: stringArray(20, 50),
   preferred_styles: stringArray(20, 50),
+  preferred_freelancer_ids: stringArray(5, 100),
   required_language: optionalShortText(50),
   script_required: z.boolean().default(false),
   rehearsal_required: z.boolean().default(false),
@@ -79,18 +80,51 @@ router.post(
   async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const body = createRequestSchema.parse(req.body);
-      const eventDate = new Date(body.event_date);
+      const { preferred_freelancer_ids, ...requestBody } = body;
+      const uniquePreferredFreelancerIds = [...new Set(preferred_freelancer_ids ?? [])];
+      const eventDate = new Date(requestBody.event_date);
+
+      const preferredFreelancers = uniquePreferredFreelancerIds.length > 0
+        ? await prisma.freelancerProfile.findMany({
+            where: { id: { in: uniquePreferredFreelancerIds }, status: "approved" },
+            select: { id: true, display_name: true },
+          })
+        : [];
+
+      if (preferredFreelancers.length !== uniquePreferredFreelancerIds.length) {
+        return errorResponse(
+          res,
+          "VALIDATION_ERROR",
+          "지명한 진행자를 찾을 수 없거나 현재 예약 요청이 불가능합니다.",
+          [],
+          400
+        );
+      }
 
       const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const request = await tx.eventRequest.create({
           data: {
-            ...body,
+            ...requestBody,
             event_date: eventDate,
-            attachment_url: body.attachment_url || null,
+            attachment_url: requestBody.attachment_url || null,
             customer_id: req.user!.userId,
             status: "submitted",
           },
         });
+
+        if (preferredFreelancers.length > 0) {
+          await tx.recommendation.createMany({
+            data: preferredFreelancers.map((freelancer, index) => ({
+              request_id: request.id,
+              freelancer_id: freelancer.id,
+              recommended_by: req.user!.userId,
+              recommendation_reason: `${freelancer.display_name ?? "해당 진행자"}님은 고객이 직접 지명한 우선 검토 후보입니다. 관리자 검수 후 고객에게 공개됩니다.`,
+              display_order: index + 1,
+              status: "draft",
+            })),
+            skipDuplicates: true,
+          });
+        }
 
         const matching = await generateAiRecommendationsForRequest({
           tx,
@@ -111,18 +145,32 @@ router.post(
             travel_required: request.travel_required,
           },
           recommendedByUserId: req.user!.userId,
+          excludedFreelancerIds: preferredFreelancers.map((freelancer) => freelancer.id),
+          startingDisplayOrder: preferredFreelancers.length + 1,
         });
 
-        const finalRequest = matching.count > 0
-          ? await tx.eventRequest.findUniqueOrThrow({ where: { id: request.id } })
-          : request;
+        if (preferredFreelancers.length > 0 && matching.count === 0) {
+          await tx.eventRequest.update({
+            where: { id: request.id },
+            data: { status: "recommending" },
+          });
+        }
 
-        return { request: finalRequest, matching };
+        const finalRequest = await tx.eventRequest.findUniqueOrThrow({ where: { id: request.id } });
+
+        return {
+          request: finalRequest,
+          matching: {
+            ...matching,
+            count: matching.count + preferredFreelancers.length,
+            preferred_count: preferredFreelancers.length,
+          },
+        };
       });
 
       const message = result.matching.count > 0
-        ? `요청서가 등록되었습니다. AI 데이터 매칭으로 추천 후보 ${result.matching.count}명을 찾았습니다.`
-        : "요청서가 등록되었습니다. 조건에 맞는 후보를 추가 확인 중입니다.";
+        ? `요청서가 등록되었습니다. 조건 기반 후보 초안 ${result.matching.count}명을 만들었으며 관리자 검수 후 공개됩니다.`
+        : "요청서가 등록되었습니다. 관리자가 조건에 맞는 후보를 확인 중입니다.";
 
       return successResponse(res, result.request, message, 201);
     } catch (err) {
@@ -246,6 +294,7 @@ router.patch(
   async (req: AuthRequest, res: Response, next: NextFunction) => {
     try {
       const body = updateRequestSchema.parse(req.body);
+      const { preferred_freelancer_ids: _preferredFreelancerIds, ...updateBody } = body;
 
       const existing = await prisma.eventRequest.findFirst({
         where: { id: req.params.id, customer_id: req.user!.userId },
@@ -263,9 +312,9 @@ router.patch(
       const updated = await prisma.eventRequest.update({
         where: { id: req.params.id },
         data: {
-          ...body,
-          ...(body.event_date && { event_date: new Date(body.event_date) }),
-          ...("attachment_url" in body && { attachment_url: body.attachment_url ?? null }),
+          ...updateBody,
+          ...(updateBody.event_date && { event_date: new Date(updateBody.event_date) }),
+          ...("attachment_url" in updateBody && { attachment_url: updateBody.attachment_url ?? null }),
         },
       });
 
@@ -325,7 +374,10 @@ router.get(
       }
 
       const recommendations = await prisma.recommendation.findMany({
-        where: { request_id: req.params.id },
+        where: {
+          request_id: req.params.id,
+          status: { in: ["sent", "viewed", "consultation_requested", "selected", "rejected"] },
+        },
         orderBy: { display_order: "asc" },
         include: {
           freelancer: {

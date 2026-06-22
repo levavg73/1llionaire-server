@@ -27,6 +27,12 @@ export const optionalShortText = (max = 1000) =>
 export const stringArray = (maxItems = 20, maxItemLength = 50) =>
   z.array(z.string().trim().min(1).max(maxItemLength)).max(maxItems).default([]);
 
+export const requiredStringArray = (maxItems = 20, maxItemLength = 50, minItems = 1) =>
+  z
+    .array(z.string().trim().min(1).max(maxItemLength))
+    .min(minItems)
+    .max(maxItems);
+
 export const optionalStringArray = (maxItems = 20, maxItemLength = 50) =>
   z.array(z.string().trim().min(1).max(maxItemLength)).max(maxItems).optional();
 
