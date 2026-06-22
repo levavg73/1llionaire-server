@@ -1,19 +1,19 @@
 /**
- * AI 단가 분석 라우터 (Claude claude-sonnet-4-20250514)
+ * AI 단가 분석 라우터 (OpenAI GPT Responses API)
  *
  * - POST /api/ai/pricing-analysis     — 단위 항목별 단가 분석 리포트 생성
  * - POST /api/ai/apply-recommendation — 관리자: AI 추천 단가를 예약에 반영
  * - PATCH /api/customer/requests/:id/apply-ai-budget — 고객 요청서 예산 반영
  *
  * SRP: AI 연동 로직만 담당
- * DIP: requireAnthropicKey()로 키 검증 분리
+ * DIP: requireOpenAIKey()로 키 검증 분리
  */
 
 import { Router, Response, NextFunction } from "express";
 import axios from "axios";
 import { z } from "zod";
 import prisma from "../config/database";
-import { requireAnthropicKey } from "../config/env";
+import { env, requireOpenAIKey } from "../config/env";
 import { authenticate } from "../middleware/auth";
 import { requireAdmin, requireCustomerOrAdmin } from "../middleware/roles";
 import { AuthRequest } from "../types";
@@ -47,33 +47,63 @@ export interface PricingAnalysisResult {
   generated_at: string;
 }
 
-// ─── Claude API 헬퍼 ─────────────────────────────────────────
+interface OpenAIResponseContentPart {
+  type?: string;
+  text?: string;
+}
 
-async function callClaude(prompt: string, systemPrompt: string): Promise<string> {
-  const apiKey = requireAnthropicKey();
+interface OpenAIResponseOutputItem {
+  type?: string;
+  content?: OpenAIResponseContentPart[];
+}
 
-  const response = await axios.post<{
-    content: Array<{ type: string; text: string }>;
-  }>(
-    "https://api.anthropic.com/v1/messages",
+interface OpenAIResponsesApiResponse {
+  output_text?: string;
+  output?: OpenAIResponseOutputItem[];
+  error?: {
+    code?: string;
+    message?: string;
+  } | null;
+}
+
+// ─── OpenAI API 헬퍼 ─────────────────────────────────────────
+
+async function callGPT(prompt: string, systemPrompt: string): Promise<string> {
+  const apiKey = requireOpenAIKey();
+
+  const response = await axios.post<OpenAIResponsesApiResponse>(
+    "https://api.openai.com/v1/responses",
     {
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1500,
-      system: systemPrompt,
-      messages: [{ role: "user", content: prompt }],
+      model: env.OPENAI_MODEL,
+      instructions: systemPrompt,
+      input: prompt,
+      max_output_tokens: 1500,
     },
     {
       headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       timeout: 30_000,
     }
   );
 
-  const textBlock = response.data.content.find((b) => b.type === "text");
-  return textBlock?.text ?? "";
+  if (response.data.error) {
+    throw new Error(response.data.error.message ?? "OpenAI API error");
+  }
+
+  if (response.data.output_text) {
+    return response.data.output_text;
+  }
+
+  const textBlocks =
+    response.data.output
+      ?.flatMap((item) => item.content ?? [])
+      .filter((part) => part.type === "output_text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n") ?? "";
+
+  return textBlocks;
 }
 
 function parsePricingJson(raw: string): PricingAnalysisResult {
@@ -179,7 +209,7 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
 
 위 조건으로 단위 항목별 단가를 분석해 주세요. line_items는 해당 행사에 필요한 항목만 포함하세요.`;
 
-      const rawResponse = await callClaude(prompt, systemPrompt);
+      const rawResponse = await callGPT(prompt, systemPrompt);
       const analysis = parsePricingJson(rawResponse);
       analysis.generated_at = new Date().toISOString();
 
@@ -202,7 +232,7 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
 
       return successResponse(res, { analysis, market_data: marketData });
     } catch (err) {
-      if (axios.isAxiosError(err) && err.config?.url?.includes("anthropic")) {
+      if (axios.isAxiosError(err) && err.config?.url?.includes("openai")) {
         return errorResponse(
           res,
           "SERVER_ERROR",
@@ -402,11 +432,11 @@ router.post(
 
 이 진행자를 이 요청서에 추천하는 구체적인 사유를 2~3문장으로 작성해 주세요.`;
 
-      const reason = await callClaude(prompt, systemPrompt);
+      const reason = await callGPT(prompt, systemPrompt);
 
       return successResponse(res, { reason: reason.trim() });
     } catch (err) {
-      if (axios.isAxiosError(err) && err.config?.url?.includes("anthropic")) {
+      if (axios.isAxiosError(err) && err.config?.url?.includes("openai")) {
         return errorResponse(res, "SERVER_ERROR", "AI 서비스 오류가 발생했습니다.", [], 503);
       }
       next(err);
