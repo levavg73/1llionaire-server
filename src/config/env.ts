@@ -55,9 +55,9 @@ const envSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().url().optional(),
 
-  // ─── AI (OpenAI GPT) ──────────────────────────────────────
-  OPENAI_API_KEY: z.string().optional(),
-  OPENAI_MODEL: z.string().default("gpt-4.1-mini"),
+  // ─── AI (Google Gemini) ───────────────────────────────────
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_MODEL: z.string().default("gemini-2.5-flash"),
 
   // ─── 에스크로 자동 릴리즈 (행사 완료 후 N일) ───────────────
   ESCROW_AUTO_RELEASE_DAYS: z.coerce.number().int().min(1).default(7),
@@ -82,9 +82,9 @@ export function requireTossKeys(): { secretKey: string; clientKey: string } {
 }
 
 // AI 키 런타임 검증 헬퍼 (ai.ts에서 호출)
-export function requireOpenAIKey(): string {
-  if (!env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY 환경변수가 설정되지 않았습니다.");
+export function requireGeminiKey(): string {
+  if (!env.GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.");
   }
-  return env.OPENAI_API_KEY;
+  return env.GEMINI_API_KEY;
 }
