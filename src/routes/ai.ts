@@ -35,6 +35,8 @@ export interface LineItem {
 
 export type Confidence = "high" | "medium" | "low";
 
+export type BudgetRealismStatus = "below_market" | "within_market" | "above_market" | "unknown";
+
 export interface PricingAnalysisResult {
   event_summary: string;
   line_items: LineItem[];
@@ -42,6 +44,11 @@ export interface PricingAnalysisResult {
   recommended_max: number;
   recommended_center: number;
   confidence: Confidence;
+  budget_realism: {
+    status: BudgetRealismStatus;
+    message: string;
+    recommended_action: string;
+  };
   assumptions: string[];
   caution_notes: string[];
   generated_at: string;
@@ -175,6 +182,77 @@ function roundToTenThousand(value: number) {
   return Math.max(0, Math.round(value / 10_000) * 10_000);
 }
 
+function buildBudgetRealism(
+  body: PricingRequestBody,
+  marketData: PricingMarketData,
+  recommendedMin: number,
+  recommendedMax: number,
+  recommendedCenter: number
+): PricingAnalysisResult["budget_realism"] {
+  const hasBudget = Boolean(body.budget_min || body.budget_max);
+  if (!hasBudget) {
+    return {
+      status: "unknown",
+      message: "고객 예산이 입력되지 않아 시장 단가 기준으로 적정 범위를 산정했습니다.",
+      recommended_action: "추천 범위를 기준으로 예산을 설정한 뒤 후보와 세부 조건을 조율하세요.",
+    };
+  }
+
+  const budgetMin = body.budget_min ?? 0;
+  const budgetMax = body.budget_max ?? body.budget_min ?? 0;
+  const marketCenter = marketData.avg_price_min || marketData.avg_price_max
+    ? Math.round(((marketData.avg_price_min || marketData.market_min || recommendedCenter) + (marketData.avg_price_max || marketData.market_max || recommendedCenter)) / 2)
+    : recommendedCenter;
+
+  if (budgetMax > 0 && budgetMax < recommendedMin) {
+    return {
+      status: "below_market",
+      message: `입력 예산 상한 ${budgetMax.toLocaleString("ko-KR")}원은 산정된 적정 최소 단가 ${recommendedMin.toLocaleString("ko-KR")}원보다 낮습니다.`,
+      recommended_action: "예산을 상향하거나 행사 시간, 대본/리허설, 출장 범위를 줄여 조건을 조정하는 편이 현실적입니다.",
+    };
+  }
+
+  if (budgetMin > 0 && budgetMin > Math.round(recommendedMax * 1.25)) {
+    return {
+      status: "above_market",
+      message: `입력 예산은 유사 시장 단가 중심값 ${marketCenter.toLocaleString("ko-KR")}원보다 여유가 있습니다.`,
+      recommended_action: "상위 경력자, 외국어 진행, 대본 작성, 리허설 포함 조건으로 후보 품질을 높일 수 있습니다.",
+    };
+  }
+
+  return {
+    status: "within_market",
+    message: "입력 예산은 플랫폼 시장 데이터와 행사 조건을 기준으로 현실적인 범위에 있습니다.",
+    recommended_action: "현재 예산 범위 안에서 경력, 후기, 포트폴리오가 맞는 후보를 우선 비교하세요.",
+  };
+}
+
+function normalizePricingAnalysis(
+  analysis: PricingAnalysisResult,
+  body: PricingRequestBody,
+  marketData: PricingMarketData
+): PricingAnalysisResult {
+  const fallback = buildFallbackPricingAnalysis(body, marketData);
+  const recommendedCenter = roundToTenThousand(Number(analysis.recommended_center) || fallback.recommended_center);
+  const recommendedMin = roundToTenThousand(Number(analysis.recommended_min) || fallback.recommended_min || recommendedCenter);
+  const recommendedMax = roundToTenThousand(Math.max(Number(analysis.recommended_max) || fallback.recommended_max || recommendedCenter, recommendedMin));
+
+  return {
+    ...analysis,
+    line_items: Array.isArray(analysis.line_items) ? analysis.line_items : [],
+    recommended_min: recommendedMin,
+    recommended_max: recommendedMax,
+    recommended_center: recommendedCenter,
+    confidence: ["high", "medium", "low"].includes(analysis.confidence) ? analysis.confidence : "medium",
+    budget_realism: analysis.budget_realism?.message
+      ? analysis.budget_realism
+      : buildBudgetRealism(body, marketData, recommendedMin, recommendedMax, recommendedCenter),
+    assumptions: Array.isArray(analysis.assumptions) ? analysis.assumptions : [],
+    caution_notes: Array.isArray(analysis.caution_notes) ? analysis.caution_notes : [],
+    generated_at: new Date().toISOString(),
+  };
+}
+
 function buildFallbackPricingAnalysis(
   body: PricingRequestBody,
   marketData: PricingMarketData
@@ -230,6 +308,7 @@ function buildFallbackPricingAnalysis(
     recommended_max: recommendedMax,
     recommended_center: recommendedCenter,
     confidence: marketData.sample_count >= 5 ? "medium" : "low",
+    budget_realism: buildBudgetRealism(body, marketData, recommendedMin, recommendedMax, recommendedCenter),
     assumptions: [
       "플랫폼 내 승인 진행자 단가 데이터를 우선 반영했습니다.",
       "AI 외부 모델 응답이 불안정할 때 시장 데이터 기반 산식으로 계산했습니다.",
@@ -277,6 +356,7 @@ router.post(
 
       const systemPrompt = `당신은 한국 행사 진행자(MC/아나운서/쇼호스트) 시장 전문 단가 분석가입니다.
 제공된 시장 데이터와 요청 조건을 바탕으로 단위 항목별 적정 단가를 분석합니다.
+고객 예산에 억지로 맞추지 말고, 행사 시간·요구 경력·지역·분야·플랫폼 시장 단가 기준으로 예산이 현실적인지 판단합니다.
 
 반드시 아래 JSON 형식으로만 응답하세요:
 {
@@ -293,6 +373,11 @@ router.post(
   "recommended_max": <최대 추천 총액 (원, 정수)>,
   "recommended_center": <중심 추천 총액 (원, 정수)>,
   "confidence": "<high|medium|low>",
+  "budget_realism": {
+    "status": "<below_market|within_market|above_market|unknown>",
+    "message": "<고객 예산이 시장/시간/경력 조건상 현실적인지 판단>",
+    "recommended_action": "<예산 상향, 조건 조정, 상위 후보 가능성 등 다음 행동>"
+  },
   "assumptions": ["<가정 1>", "<가정 2>"],
   "caution_notes": ["<주의사항 1>", "<주의사항 2>"],
   "generated_at": "<ISO 8601 현재 시각>"
@@ -324,7 +409,9 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
 - 시장 최고가: ${marketData.market_max.toLocaleString("ko-KR")}원
 - 평균 평점: ${marketData.avg_rating}점
 
-위 조건으로 단위 항목별 단가를 분석해 주세요. line_items는 해당 행사에 필요한 항목만 포함하세요.`;
+위 조건으로 단위 항목별 단가를 분석해 주세요. line_items는 해당 행사에 필요한 항목만 포함하세요.
+고객 예산이 시장가보다 낮으면 추천 단가를 억지로 낮추지 말고 budget_realism.status를 below_market으로 표시하고 이유를 설명하세요.
+진행 시간이 길거나 최소 경력이 높으면 본행사 진행비와 준비비를 현실적으로 상향 반영하세요.`;
 
       let analysisSource: "gemini" | "market_fallback" = "gemini";
       let analysis: PricingAnalysisResult;
@@ -341,7 +428,7 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
         analysis = buildFallbackPricingAnalysis(body, marketData);
       }
 
-      analysis.generated_at = new Date().toISOString();
+      analysis = normalizePricingAnalysis(analysis, body, marketData);
 
       // 요청서 연계: AI 단가 분석 알림
       if (body.request_id) {

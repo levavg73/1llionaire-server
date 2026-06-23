@@ -4,8 +4,8 @@ import { env, requireGeminiKey } from "../config/env";
 import { createProfileImageSignedUrl } from "../utils/profileImages";
 
 const TOP_RECOMMENDATION_COUNT = 5;
-const AI_RECOMMENDATION_POOL_SIZE = 10;
-const MAX_AI_IMAGE_COUNT = 10;
+const AI_RECOMMENDATION_POOL_SIZE = 20;
+const MAX_AI_IMAGE_COUNT = 12;
 const MAX_AI_IMAGE_BYTES = 1_500_000;
 
 const EVENT_TYPE_SYNONYMS: Record<string, string[]> = {
@@ -332,11 +332,9 @@ function scoreCandidate(request: RequestForMatching, candidate: MatchingCandidat
     score += Math.min(4, candidate.voice_score);
   }
 
-  if (score < 12) return null;
-
   return {
     candidate,
-    score: Math.round(score * 10) / 10,
+    score: Math.max(0, Math.round(score * 10) / 10),
     reasons,
   };
 }
@@ -494,18 +492,28 @@ function parseAiRecommendationJson(raw: string): AiRecommendationItem[] {
   return parsed.recommendations ?? parsed.items ?? parsed.results ?? [];
 }
 
-function sanitizeAiReason(reason: string | null | undefined) {
-  const normalized = truncate(reason, 700);
-  if (!normalized || normalized.length < 30) return null;
+export function isGenericRecommendationReason(reason: string | null | undefined) {
+  const normalized = reason?.replace(/\s+/g, " ").trim() ?? "";
+  if (!normalized) return true;
 
   const genericPatterns = [
     "조건 기반 매칭 결과",
     "요청 조건과 잘 맞습니다",
     "적합한 후보로 추천되었습니다",
+    "조건에 맞는 후보",
+    "분야 적합",
+    "지역 조건 적합",
+    "예산 범위 적합",
   ];
 
   const genericHitCount = genericPatterns.filter((pattern) => normalized.includes(pattern)).length;
-  if (genericHitCount >= 2) return null;
+  return normalized.length < 45 || genericHitCount >= 2;
+}
+
+function sanitizeAiReason(reason: string | null | undefined) {
+  const normalized = truncate(reason, 900);
+  if (!normalized || normalized.length < 40) return null;
+  if (isGenericRecommendationReason(normalized)) return null;
 
   return normalized;
 }
@@ -675,12 +683,14 @@ async function collectCandidateImageParts(ranked: CandidateScore[]) {
 function buildAiRecommendationSystemPrompt() {
   return [
     "당신은 행사 진행자/MC 매칭 전문가입니다.",
-    "고객 요청서와 후보별 자기소개, 후기, 포트폴리오, 프로필/포트폴리오 이미지를 근거로 최종 추천 순서와 추천 사유를 작성합니다.",
-    "추천 사유는 고객에게 바로 노출됩니다. 한국어 존댓말로 자연스럽고 구체적으로 작성하세요.",
-    "각 추천 사유에는 요청서 조건과 실제 후보 근거를 최소 2개 이상 연결하세요. 예: 행사 유형, 지역, 스타일, 언어, 대본/리허설/출장 가능 여부, 후기 내용, 포트폴리오 사례, 이미지에서 보이는 분위기.",
-    "후기/소개/포트폴리오/이미지에서 확인되지 않는 경력이나 실적은 절대 지어내지 마세요.",
-    "이미지 내용은 명확히 확인되는 경우에만 언급하고, 불확실하면 '포트폴리오 자료를 확인할 수 있어'처럼 보수적으로 표현하세요.",
-    "'조건 기반 매칭 결과' 같은 일반 문구만 반복하지 마세요.",
+    "목표는 단순 조건 점수 계산이 아니라, 고객 요청서를 읽고 후보별 등록 자료를 비교해 실제로 이 요청서에 부합하는 진행자를 선별하는 것입니다.",
+    "반드시 고객 요청서의 행사 목적/분야/지역/시간/예산/선호 스타일/필수 조건과 후보의 자기소개, 헤드라인, 경력, 단가, 후기, 포트폴리오, 이미지 단서를 서로 연결해 판단하세요.",
+    "추천하지 않아도 되는 후보는 제외하세요. 근거가 부족하거나 요청서와 약한 후보를 억지로 5명까지 채우지 마세요.",
+    "추천 사유는 고객에게 바로 노출됩니다. 한국어 존댓말 2~3문장으로 자연스럽고 구체적으로 작성하세요.",
+    "각 추천 사유에는 실제 후보 자료 근거를 최소 2개 이상 포함하세요. 예: 자기소개 문구, 유사 행사 포트폴리오, 후기의 평가 항목/코멘트, 경력 연수, 단가와 고객 예산의 관계, 이미지에서 보이는 전문적 분위기.",
+    "후기/소개/포트폴리오/이미지에서 확인되지 않는 실적, 수상, 행사 경험은 절대 지어내지 마세요.",
+    "이미지는 명확히 확인되는 분위기/전문성 단서만 반영하고, 불확실하면 이미지 자체를 언급하지 마세요.",
+    "'조건 기반 매칭 결과', '요청 조건과 잘 맞습니다'처럼 일반적인 문장만 쓰면 안 됩니다.",
     "반드시 JSON만 반환하세요. 마크다운, 설명문, 코드블록은 금지입니다.",
   ].join("\n");
 }
@@ -688,13 +698,14 @@ function buildAiRecommendationSystemPrompt() {
 function buildAiRecommendationUserPrompt(request: RequestForMatching, ranked: CandidateScore[]) {
   return JSON.stringify(
     {
-      task: "아래 고객 요청서에 가장 적합한 진행자 최대 5명을 추천 순서대로 고르고, 각 후보별 추천 사유를 작성하세요.",
+      task: "아래 고객 요청서와 후보 자료를 비교해, 이 요청서에 실제로 부합하는 진행자만 최대 5명 추천 순서대로 고르고 추천 사유를 작성하세요. 후보 자료 근거가 부족하면 추천하지 마세요.",
       output_schema: {
         recommendations: [
           {
             freelancer_id: "후보 ID",
             match_score: "0부터 100 사이 숫자",
-            recommendation_reason: "고객에게 보여줄 2~3문장 추천 사유",
+            evidence: ["요청서 조건과 연결되는 실제 후보 근거 1", "실제 후보 근거 2"],
+            recommendation_reason: "고객에게 보여줄 2~3문장 추천 사유. 반드시 자기소개/후기/포트폴리오/경력/이미지/단가 중 실제 근거를 요청서 조건과 연결해서 작성",
           },
         ],
       },
@@ -769,9 +780,13 @@ async function buildAiRecommendationDrafts(
         ?? recommendation.reason
     );
 
+    // AI가 실제 근거가 있는 추천 사유를 작성하지 못한 후보는 저장하지 않습니다.
+    // 고객에게 조건 조합형 문장을 보여주지 않기 위한 의도적인 차단입니다.
+    if (!recommendationReason) continue;
+
     drafts.push({
       scored,
-      recommendationReason: recommendationReason ?? buildRecommendationReason(scored, request),
+      recommendationReason,
       aiScore: normalizeAiScore(
         recommendation.match_score ?? recommendation.matchScore ?? recommendation.score
       ),
@@ -779,18 +794,11 @@ async function buildAiRecommendationDrafts(
     selectedIds.add(candidateId);
   }
 
-  if (drafts.length === 0 && lastError) {
-    console.error("[ai-recommendation-reason-generation-fell-back]", lastError);
+  if (drafts.length === 0) {
+    console.error("[ai-recommendation-no-valid-ai-reasons]", lastError);
   }
 
-  const remaining = ranked
-    .filter((item) => !selectedIds.has(item.candidate.id))
-    .map((scored) => ({
-      scored,
-      recommendationReason: buildRecommendationReason(scored, request),
-    }));
-
-  return [...drafts, ...remaining].slice(0, TOP_RECOMMENDATION_COUNT);
+  return drafts.slice(0, TOP_RECOMMENDATION_COUNT);
 }
 
 function joinNaturalKorean(items: string[]) {
@@ -974,6 +982,10 @@ export async function generateAiRecommendationsForRequest(params: {
   }
 
   const recommendationDrafts = await buildAiRecommendationDrafts(request, ranked);
+
+  if (recommendationDrafts.length === 0) {
+    throw new Error("AI_RECOMMENDATION_REASON_GENERATION_FAILED");
+  }
 
   await prisma.recommendation.createMany({
     data: recommendationDrafts.map((item, index) => ({

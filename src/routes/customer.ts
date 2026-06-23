@@ -11,7 +11,7 @@ import {
   listResponse,
   parsePagination,
 } from "../utils/response";
-import { generateAiRecommendationsForRequest } from "../services/aiMatching";
+import { generateAiRecommendationsForRequest, isGenericRecommendationReason } from "../services/aiMatching";
 import { attachSignedProfileImageUrl } from "../utils/profileImages";
 import {
   eventDateString,
@@ -295,7 +295,7 @@ router.post(
       const responseRequest = (await attachRequestViewCounts([finalRequest]))[0];
 
       const message = totalRecommendationCount > 0
-        ? `요청서가 등록되었습니다. 조건 기반 후보 ${totalRecommendationCount}명을 바로 추천했습니다.`
+        ? `요청서가 등록되었습니다. AI가 요청서와 진행자 정보를 분석해 후보 ${totalRecommendationCount}명을 추천했습니다.`
         : matching.failed
           ? "요청서가 등록되었습니다. AI 후보 추천은 잠시 후 다시 생성해 주세요."
           : "요청서가 등록되었습니다. 조건에 맞는 후보를 찾는 중입니다.";
@@ -488,7 +488,7 @@ router.patch(
       const responseRequest = (await attachRequestViewCounts([finalRequest]))[0];
 
       const message = matching.count > 0
-        ? `요청서가 수정되었습니다. 새 조건 기준 후보 ${matching.count}명을 바로 추천했습니다.`
+        ? `요청서가 수정되었습니다. AI가 새 요청 조건을 분석해 후보 ${matching.count}명을 추천했습니다.`
         : matching.failed
           ? "요청서가 수정되었습니다. AI 후보 추천은 잠시 후 다시 생성해 주세요."
           : "요청서가 수정되었습니다. 새 조건에 맞는 후보를 찾는 중입니다.";
@@ -659,6 +659,64 @@ router.delete(
   }
 );
 
+const REGENERATABLE_RECOMMENDATION_STATUSES = ["draft", "sent", "viewed", "rejected"] as const;
+const PROTECTED_RECOMMENDATION_STATUSES = ["consultation_requested", "selected"] as const;
+
+async function ensureAiRecommendationsForRequest(request: RequestResponse, recommendedByUserId: string) {
+  if (!["submitted", "reviewing", "recommending", "recommended"].includes(request.status)) {
+    return;
+  }
+
+  const currentRecommendations = await prisma.recommendation.findMany({
+    where: { request_id: request.id },
+    select: { id: true, status: true, recommendation_reason: true },
+  });
+
+  const hasProtectedRecommendation = currentRecommendations.some((recommendation) =>
+    PROTECTED_RECOMMENDATION_STATUSES.includes(
+      recommendation.status as (typeof PROTECTED_RECOMMENDATION_STATUSES)[number]
+    )
+  );
+
+  if (hasProtectedRecommendation) return;
+
+  const hasNoRecommendations = currentRecommendations.length === 0;
+  const hasGenericRecommendations = currentRecommendations.some((recommendation) =>
+    REGENERATABLE_RECOMMENDATION_STATUSES.includes(
+      recommendation.status as (typeof REGENERATABLE_RECOMMENDATION_STATUSES)[number]
+    ) && isGenericRecommendationReason(recommendation.recommendation_reason)
+  );
+
+  if (!hasNoRecommendations && !hasGenericRecommendations) return;
+
+  await prisma.recommendation.deleteMany({
+    where: {
+      request_id: request.id,
+      status: { in: [...REGENERATABLE_RECOMMENDATION_STATUSES] },
+    },
+  });
+
+  try {
+    await generateAiRecommendationsForRequest({
+      request: toMatchingRequest(request),
+      recommendedByUserId,
+    });
+  } catch (err) {
+    console.error("[ai-recommendation-regeneration-failed]", {
+      request_id: request.id,
+      err,
+    });
+
+    await prisma.eventRequest.update({
+      where: { id: request.id },
+      data: { status: "submitted" },
+      select: { id: true },
+    }).catch((updateErr) => {
+      console.warn("[ai-recommendation-regeneration-status-reset-failed]", updateErr);
+    });
+  }
+}
+
 // ── GET /api/customer/requests/:id/recommendations ──────────
 
 router.get(
@@ -669,12 +727,14 @@ router.get(
     try {
       const request = await prisma.eventRequest.findFirst({
         where: { id: req.params.id, customer_id: req.user!.userId },
-        select: { id: true },
+        select: requestResponseSelect,
       });
 
       if (!request) {
         return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
       }
+
+      await ensureAiRecommendationsForRequest(request, req.user!.userId);
 
       const recommendations = await prisma.recommendation.findMany({
         where: {
