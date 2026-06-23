@@ -1,5 +1,5 @@
-import { Prisma } from "@prisma/client";
 import axios from "axios";
+import prisma from "../config/database";
 import { env, requireGeminiKey } from "../config/env";
 import { createProfileImageSignedUrl } from "../utils/profileImages";
 
@@ -699,21 +699,19 @@ function buildRecommendationReason(scored: CandidateScore) {
 }
 
 export async function generateAiRecommendationsForRequest(params: {
-  tx: Prisma.TransactionClient;
   request: RequestForMatching;
   recommendedByUserId: string;
   excludedFreelancerIds?: string[];
   startingDisplayOrder?: number;
 }) {
   const {
-    tx,
     request,
     recommendedByUserId,
     excludedFreelancerIds = [],
     startingDisplayOrder = 1,
   } = params;
 
-  const candidates = await tx.freelancerProfile.findMany({
+  const candidates = await prisma.freelancerProfile.findMany({
     where: {
       status: "approved",
       ...(excludedFreelancerIds.length > 0 && { id: { notIn: excludedFreelancerIds } }),
@@ -805,7 +803,7 @@ export async function generateAiRecommendationsForRequest(params: {
 
   const recommendationDrafts = await buildAiRecommendationDrafts(request, ranked);
 
-  await tx.recommendation.createMany({
+  await prisma.recommendation.createMany({
     data: recommendationDrafts.map((item, index) => ({
       request_id: request.id,
       freelancer_id: item.scored.candidate.id,
@@ -817,9 +815,10 @@ export async function generateAiRecommendationsForRequest(params: {
     skipDuplicates: true,
   });
 
-  const updatedRequest = await tx.eventRequest.update({
+  const updatedRequest = await prisma.eventRequest.update({
     where: { id: request.id },
     data: { status: "recommended" },
+    select: { status: true },
   });
 
   return {

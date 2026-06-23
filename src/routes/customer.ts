@@ -69,6 +69,102 @@ function toMatchingRequest(request: {
   };
 }
 
+const requestResponseSelect = {
+  id: true,
+  customer_id: true,
+  event_title: true,
+  event_type: true,
+  event_date: true,
+  start_time: true,
+  end_time: true,
+  region: true,
+  venue: true,
+  budget_min: true,
+  budget_max: true,
+  preferred_freelancer_type: true,
+  preferred_styles: true,
+  required_language: true,
+  script_required: true,
+  rehearsal_required: true,
+  travel_required: true,
+  attachment_url: true,
+  description: true,
+  status: true,
+  created_at: true,
+  updated_at: true,
+} satisfies Prisma.EventRequestSelect;
+
+type RequestResponse = Prisma.EventRequestGetPayload<{ select: typeof requestResponseSelect }>;
+
+async function getRequestViewCounts(requestIds: string[]) {
+  if (requestIds.length === 0) return new Map<string, number>();
+
+  try {
+    const rows = await prisma.$queryRaw<Array<{ id: string; view_count: number | bigint }>>(
+      Prisma.sql`SELECT id, view_count FROM "event_requests" WHERE id IN (${Prisma.join(requestIds)})`
+    );
+
+    return new Map(rows.map((row) => [row.id, Number(row.view_count ?? 0)]));
+  } catch (err) {
+    console.warn("[request-view-count-unavailable] view_count column is not ready", err);
+    return new Map<string, number>();
+  }
+}
+
+async function attachRequestViewCounts<T extends { id: string }>(items: T[]) {
+  const counts = await getRequestViewCounts(items.map((item) => item.id));
+
+  return items.map((item) => ({
+    ...item,
+    view_count: counts.get(item.id) ?? 0,
+  }));
+}
+
+async function incrementRequestViewCount(requestId: string) {
+  try {
+    const rows = await prisma.$queryRaw<Array<{ view_count: number | bigint }>>(
+      Prisma.sql`
+        UPDATE "event_requests"
+        SET view_count = view_count + 1
+        WHERE id = ${requestId}
+        RETURNING view_count
+      `
+    );
+
+    return Number(rows[0]?.view_count ?? 0);
+  } catch (err) {
+    console.warn("[request-view-count-increment-skipped] view_count column is not ready", err);
+    return 0;
+  }
+}
+
+async function runAiRecommendationsSafely(params: {
+  request: RequestResponse;
+  recommendedByUserId: string;
+  excludedFreelancerIds?: string[];
+  startingDisplayOrder?: number;
+}): Promise<{ count: number; status: string; failed?: boolean }> {
+  try {
+    return await generateAiRecommendationsForRequest({
+      request: toMatchingRequest(params.request),
+      recommendedByUserId: params.recommendedByUserId,
+      excludedFreelancerIds: params.excludedFreelancerIds,
+      startingDisplayOrder: params.startingDisplayOrder,
+    });
+  } catch (err) {
+    console.error("[ai-recommendation-generation-failed]", {
+      request_id: params.request.id,
+      err,
+    });
+
+    return {
+      count: 0,
+      status: params.request.status,
+      failed: true,
+    };
+  }
+}
+
 // ── Zod 스키마 ──────────────────────────────────────────────
 
 const requestBaseSchema = z.object({
@@ -146,7 +242,7 @@ router.post(
         );
       }
 
-      const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const createdRequest = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const request = await tx.eventRequest.create({
           data: {
             ...requestBody,
@@ -155,6 +251,7 @@ router.post(
             customer_id: req.user!.userId,
             status: "submitted",
           },
+          select: requestResponseSelect,
         });
 
         if (preferredFreelancers.length > 0) {
@@ -171,38 +268,39 @@ router.post(
           });
         }
 
-        const matching = await generateAiRecommendationsForRequest({
-          tx,
-          request: toMatchingRequest(request),
-          recommendedByUserId: req.user!.userId,
-          excludedFreelancerIds: preferredFreelancers.map((freelancer) => freelancer.id),
-          startingDisplayOrder: preferredFreelancers.length + 1,
-        });
-
-        if (preferredFreelancers.length > 0 && matching.count === 0) {
-          await tx.eventRequest.update({
-            where: { id: request.id },
-            data: { status: "recommended" },
-          });
-        }
-
-        const finalRequest = await tx.eventRequest.findUniqueOrThrow({ where: { id: request.id } });
-
-        return {
-          request: finalRequest,
-          matching: {
-            ...matching,
-            count: matching.count + preferredFreelancers.length,
-            preferred_count: preferredFreelancers.length,
-          },
-        };
+        return request;
       });
 
-      const message = result.matching.count > 0
-        ? `요청서가 등록되었습니다. 조건 기반 후보 ${result.matching.count}명을 바로 추천했습니다.`
-        : "요청서가 등록되었습니다. 조건에 맞는 후보를 찾는 중입니다.";
+      const matching = await runAiRecommendationsSafely({
+        request: createdRequest,
+        recommendedByUserId: req.user!.userId,
+        excludedFreelancerIds: preferredFreelancers.map((freelancer) => freelancer.id),
+        startingDisplayOrder: preferredFreelancers.length + 1,
+      });
 
-      return successResponse(res, result.request, message, 201);
+      if (preferredFreelancers.length > 0 && matching.count === 0) {
+        await prisma.eventRequest.update({
+          where: { id: createdRequest.id },
+          data: { status: "recommended" },
+          select: { id: true },
+        });
+      }
+
+      const finalRequest = await prisma.eventRequest.findUniqueOrThrow({
+        where: { id: createdRequest.id },
+        select: requestResponseSelect,
+      });
+
+      const totalRecommendationCount = matching.count + preferredFreelancers.length;
+      const responseRequest = (await attachRequestViewCounts([finalRequest]))[0];
+
+      const message = totalRecommendationCount > 0
+        ? `요청서가 등록되었습니다. 조건 기반 후보 ${totalRecommendationCount}명을 바로 추천했습니다.`
+        : matching.failed
+          ? "요청서가 등록되었습니다. AI 후보 추천은 잠시 후 다시 생성해 주세요."
+          : "요청서가 등록되었습니다. 조건에 맞는 후보를 찾는 중입니다.";
+
+      return successResponse(res, responseRequest, message, 201);
     } catch (err) {
       next(err);
     }
@@ -238,7 +336,6 @@ router.get(
             event_date: true,
             region: true,
             description: true,
-            view_count: true,
             status: true,
             created_at: true,
             updated_at: true,
@@ -247,7 +344,9 @@ router.get(
         prisma.eventRequest.count({ where }),
       ]);
 
-      return listResponse(res, items, total, page, limit);
+      const responseItems = await attachRequestViewCounts(items);
+
+      return listResponse(res, responseItems, total, page, limit);
     } catch (err) {
       next(err);
     }
@@ -267,7 +366,8 @@ router.get(
           id: req.params.id,
           customer_id: req.user!.userId,
         },
-        include: {
+        select: {
+          ...requestResponseSelect,
           recommendations: {
             include: {
               freelancer: {
@@ -300,13 +400,11 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
       }
 
-      const updatedRequest = await prisma.eventRequest.update({
-        where: { id: request.id },
-        data: { view_count: { increment: 1 } } as any,
-      });
+      const viewCount = await incrementRequestViewCount(request.id);
 
       const responseRequest = {
-        ...updatedRequest,
+        ...request,
+        view_count: viewCount,
         recommendations: await Promise.all(
           request.recommendations.map(async (recommendation) => ({
             ...recommendation,
@@ -335,6 +433,7 @@ router.patch(
 
       const existing = await prisma.eventRequest.findFirst({
         where: { id: req.params.id, customer_id: req.user!.userId },
+        select: { id: true, status: true },
       });
 
       if (!existing) {
@@ -351,8 +450,8 @@ router.patch(
         );
       }
 
-      const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        const updatedRequest = await tx.eventRequest.update({
+      const updatedRequest = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const request = await tx.eventRequest.update({
           where: { id: req.params.id },
           data: {
             ...updateBody,
@@ -363,6 +462,7 @@ router.patch(
             ...("attachment_url" in updateBody && { attachment_url: updateBody.attachment_url ?? null }),
             status: "submitted",
           },
+          select: requestResponseSelect,
         });
 
         await tx.recommendation.deleteMany({
@@ -372,24 +472,28 @@ router.patch(
           },
         });
 
-        const matching = await generateAiRecommendationsForRequest({
-          tx,
-          request: toMatchingRequest(updatedRequest),
-          recommendedByUserId: req.user!.userId,
-        });
-
-        const finalRequest = await tx.eventRequest.findUniqueOrThrow({
-          where: { id: req.params.id },
-        });
-
-        return { request: finalRequest, matching };
+        return request;
       });
 
-      const message = result.matching.count > 0
-        ? `요청서가 수정되었습니다. 새 조건 기준 후보 ${result.matching.count}명을 바로 추천했습니다.`
-        : "요청서가 수정되었습니다. 새 조건에 맞는 후보를 찾는 중입니다.";
+      const matching = await runAiRecommendationsSafely({
+        request: updatedRequest,
+        recommendedByUserId: req.user!.userId,
+      });
 
-      return successResponse(res, result.request, message);
+      const finalRequest = await prisma.eventRequest.findUniqueOrThrow({
+        where: { id: req.params.id },
+        select: requestResponseSelect,
+      });
+
+      const responseRequest = (await attachRequestViewCounts([finalRequest]))[0];
+
+      const message = matching.count > 0
+        ? `요청서가 수정되었습니다. 새 조건 기준 후보 ${matching.count}명을 바로 추천했습니다.`
+        : matching.failed
+          ? "요청서가 수정되었습니다. AI 후보 추천은 잠시 후 다시 생성해 주세요."
+          : "요청서가 수정되었습니다. 새 조건에 맞는 후보를 찾는 중입니다.";
+
+      return successResponse(res, responseRequest, message);
     } catch (err) {
       next(err);
     }
@@ -406,6 +510,7 @@ router.delete(
     try {
       const existing = await prisma.eventRequest.findFirst({
         where: { id: req.params.id, customer_id: req.user!.userId },
+        select: { id: true, status: true },
       });
 
       if (!existing) {
@@ -564,6 +669,7 @@ router.get(
     try {
       const request = await prisma.eventRequest.findFirst({
         where: { id: req.params.id, customer_id: req.user!.userId },
+        select: { id: true },
       });
 
       if (!request) {
