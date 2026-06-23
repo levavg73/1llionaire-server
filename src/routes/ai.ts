@@ -160,6 +160,88 @@ const pricingSchema = z.object({
   request_id: z.string().optional(),
 });
 
+type PricingRequestBody = z.infer<typeof pricingSchema>;
+
+type PricingMarketData = {
+  sample_count: number;
+  avg_price_min: number;
+  avg_price_max: number;
+  market_min: number;
+  market_max: number;
+  avg_rating: string;
+};
+
+function roundToTenThousand(value: number) {
+  return Math.max(0, Math.round(value / 10_000) * 10_000);
+}
+
+function buildFallbackPricingAnalysis(
+  body: PricingRequestBody,
+  marketData: PricingMarketData
+): PricingAnalysisResult {
+  const marketMinBasis = marketData.avg_price_min || marketData.market_min || 0;
+  const marketMaxBasis = marketData.avg_price_max || marketData.market_max || marketMinBasis;
+  const marketAverage = marketMinBasis
+    ? Math.round((marketMinBasis + marketMaxBasis) / 2)
+    : 0;
+  const budgetAverage = body.budget_min && body.budget_max
+    ? Math.round((body.budget_min + body.budget_max) / 2)
+    : body.budget_max ?? body.budget_min ?? 0;
+  const baseCenter = marketAverage || budgetAverage || 500_000;
+  const durationHours = body.duration_hours ?? 2;
+  const durationMultiplier = 1 + Math.max(0, durationHours - 2) * 0.15;
+  const recommendedCenter = roundToTenThousand(baseCenter * durationMultiplier);
+  const recommendedMin = roundToTenThousand(
+    Math.max(recommendedCenter * 0.85, body.budget_min ?? 0)
+  );
+  const recommendedMaxBaseline = recommendedCenter * 1.15;
+  const recommendedMax = roundToTenThousand(
+    Math.max(
+      recommendedMin,
+      body.budget_max ? Math.min(body.budget_max, recommendedMaxBaseline) : recommendedMaxBaseline
+    )
+  );
+
+  const lineItems: LineItem[] = [
+    {
+      name: "본행사 진행",
+      description: `${durationHours}시간 기준 핵심 진행 비용`,
+      estimated_price: roundToTenThousand(recommendedCenter * 0.7),
+      reason: "유사 진행자 평균 단가와 행사 시간을 반영",
+    },
+    {
+      name: "사전 미팅/큐시트 확인",
+      description: "행사 흐름 및 진행 톤 사전 조율",
+      estimated_price: roundToTenThousand(recommendedCenter * 0.15),
+      reason: "행사 완성도 확보를 위한 기본 준비 비용",
+    },
+    {
+      name: "현장 변수 대응",
+      description: "현장 상황 대응 및 진행 보정",
+      estimated_price: roundToTenThousand(recommendedCenter * 0.15),
+      reason: "현장형 진행 업무의 리스크 비용 반영",
+    },
+  ];
+
+  return {
+    event_summary: `${body.region} ${body.event_type} / ${body.categories.join(", ")}`.slice(0, 100),
+    line_items: lineItems,
+    recommended_min: recommendedMin,
+    recommended_max: recommendedMax,
+    recommended_center: recommendedCenter,
+    confidence: marketData.sample_count >= 5 ? "medium" : "low",
+    assumptions: [
+      "플랫폼 내 승인 진행자 단가 데이터를 우선 반영했습니다.",
+      "AI 외부 모델 응답이 불안정할 때 시장 데이터 기반 산식으로 계산했습니다.",
+    ],
+    caution_notes: [
+      "외부 AI 분석 서비스 장애 또는 키 설정 문제로 자동 보정 결과가 사용되었습니다.",
+      "정확한 견적은 대본 작성, 리허설, 출장 범위 확정 후 달라질 수 있습니다.",
+    ],
+    generated_at: new Date().toISOString(),
+  };
+}
+
 router.post(
   "/pricing-analysis",
   requireCustomerOrAdmin,
@@ -244,8 +326,21 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
 
 위 조건으로 단위 항목별 단가를 분석해 주세요. line_items는 해당 행사에 필요한 항목만 포함하세요.`;
 
-      const rawResponse = await callGemini(prompt, systemPrompt, { responseMimeType: "application/json" });
-      const analysis = parsePricingJson(rawResponse);
+      let analysisSource: "gemini" | "market_fallback" = "gemini";
+      let analysis: PricingAnalysisResult;
+
+      try {
+        const rawResponse = await callGemini(prompt, systemPrompt, { responseMimeType: "application/json" });
+        analysis = parsePricingJson(rawResponse);
+      } catch (aiError) {
+        analysisSource = "market_fallback";
+        console.error("[ai-pricing-analysis-fallback]", {
+          request_id: body.request_id,
+          message: aiError instanceof Error ? aiError.message : String(aiError),
+        });
+        analysis = buildFallbackPricingAnalysis(body, marketData);
+      }
+
       analysis.generated_at = new Date().toISOString();
 
       // 요청서 연계: AI 단가 분석 알림
@@ -265,17 +360,11 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
         }
       }
 
-      return successResponse(res, { analysis, market_data: marketData });
+      return successResponse(res, {
+        analysis,
+        market_data: { ...marketData, analysis_source: analysisSource },
+      });
     } catch (err) {
-      if (axios.isAxiosError(err) && err.config?.url?.includes("generativelanguage")) {
-        return errorResponse(
-          res,
-          "SERVER_ERROR",
-          "AI 분석 서비스에 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
-          [],
-          503
-        );
-      }
       next(err);
     }
   }

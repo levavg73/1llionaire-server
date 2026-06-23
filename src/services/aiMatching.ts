@@ -331,14 +331,14 @@ export async function generateAiRecommendationsForRequest(params: {
       recommended_by: recommendedByUserId,
       recommendation_reason: buildRecommendationReason(item),
       display_order: startingDisplayOrder + index,
-      status: "draft",
+      status: "sent",
     })),
     skipDuplicates: true,
   });
 
   const updatedRequest = await tx.eventRequest.update({
     where: { id: request.id },
-    data: { status: "recommending" },
+    data: { status: "recommended" },
   });
 
   return {

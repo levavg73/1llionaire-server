@@ -24,6 +24,43 @@ import {
 
 const router = Router();
 
+const REQUEST_UPDATE_ALLOWED_STATUSES = ["submitted", "reviewing", "recommending", "recommended"];
+const REQUEST_CANCEL_ALLOWED_STATUSES = ["submitted", "reviewing", "recommending", "recommended", "consulting"];
+
+function toMatchingRequest(request: {
+  id: string;
+  event_type: string;
+  event_date: Date;
+  start_time: string;
+  end_time: string;
+  region: string;
+  budget_min: number | null;
+  budget_max: number | null;
+  preferred_freelancer_type: string[];
+  preferred_styles: string[];
+  required_language: string | null;
+  script_required: boolean;
+  rehearsal_required: boolean;
+  travel_required: boolean;
+}) {
+  return {
+    id: request.id,
+    event_type: request.event_type,
+    event_date: request.event_date,
+    start_time: request.start_time,
+    end_time: request.end_time,
+    region: request.region,
+    budget_min: request.budget_min,
+    budget_max: request.budget_max,
+    preferred_freelancer_type: request.preferred_freelancer_type,
+    preferred_styles: request.preferred_styles,
+    required_language: request.required_language,
+    script_required: request.script_required,
+    rehearsal_required: request.rehearsal_required,
+    travel_required: request.travel_required,
+  };
+}
+
 // ── Zod 스키마 ──────────────────────────────────────────────
 
 const requestBaseSchema = z.object({
@@ -118,9 +155,9 @@ router.post(
               request_id: request.id,
               freelancer_id: freelancer.id,
               recommended_by: req.user!.userId,
-              recommendation_reason: `${freelancer.display_name ?? "해당 진행자"}님은 고객이 직접 지명한 우선 검토 후보입니다. 관리자 검수 후 고객에게 공개됩니다.`,
+              recommendation_reason: `${freelancer.display_name ?? "해당 진행자"}님은 고객이 직접 지명한 우선 후보입니다.`,
               display_order: index + 1,
-              status: "draft",
+              status: "sent",
             })),
             skipDuplicates: true,
           });
@@ -152,7 +189,7 @@ router.post(
         if (preferredFreelancers.length > 0 && matching.count === 0) {
           await tx.eventRequest.update({
             where: { id: request.id },
-            data: { status: "recommending" },
+            data: { status: "recommended" },
           });
         }
 
@@ -169,8 +206,8 @@ router.post(
       });
 
       const message = result.matching.count > 0
-        ? `요청서가 등록되었습니다. 조건 기반 후보 초안 ${result.matching.count}명을 만들었으며 관리자 검수 후 공개됩니다.`
-        : "요청서가 등록되었습니다. 관리자가 조건에 맞는 후보를 확인 중입니다.";
+        ? `요청서가 등록되었습니다. 조건 기반 후보 ${result.matching.count}명을 바로 추천했습니다.`
+        : "요청서가 등록되었습니다. 조건에 맞는 후보를 찾는 중입니다.";
 
       return successResponse(res, result.request, message, 201);
     } catch (err) {
@@ -304,21 +341,55 @@ router.patch(
         return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
       }
 
-      // submitted 또는 reviewing 상태만 수정 가능
-      if (!["submitted", "reviewing"].includes(existing.status)) {
-        return errorResponse(res, "FORBIDDEN", "현재 상태에서는 수정할 수 없습니다.", [], 403);
+      if (!REQUEST_UPDATE_ALLOWED_STATUSES.includes(existing.status)) {
+        return errorResponse(
+          res,
+          "FORBIDDEN",
+          "상담, 예약, 행사 완료 또는 취소 상태의 요청서는 수정할 수 없습니다.",
+          [],
+          403
+        );
       }
 
-      const updated = await prisma.eventRequest.update({
-        where: { id: req.params.id },
-        data: {
-          ...updateBody,
-          ...(updateBody.event_date && { event_date: new Date(updateBody.event_date) }),
-          ...("attachment_url" in updateBody && { attachment_url: updateBody.attachment_url ?? null }),
-        },
+      const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const updatedRequest = await tx.eventRequest.update({
+          where: { id: req.params.id },
+          data: {
+            ...updateBody,
+            ...(updateBody.event_date && { event_date: new Date(updateBody.event_date) }),
+            ...("venue" in updateBody && { venue: updateBody.venue ?? null }),
+            ...("required_language" in updateBody && { required_language: updateBody.required_language ?? null }),
+            ...("description" in updateBody && { description: updateBody.description ?? null }),
+            ...("attachment_url" in updateBody && { attachment_url: updateBody.attachment_url ?? null }),
+            status: "submitted",
+          },
+        });
+
+        await tx.recommendation.deleteMany({
+          where: {
+            request_id: req.params.id,
+            status: { in: ["draft", "sent", "viewed", "rejected"] },
+          },
+        });
+
+        const matching = await generateAiRecommendationsForRequest({
+          tx,
+          request: toMatchingRequest(updatedRequest),
+          recommendedByUserId: req.user!.userId,
+        });
+
+        const finalRequest = await tx.eventRequest.findUniqueOrThrow({
+          where: { id: req.params.id },
+        });
+
+        return { request: finalRequest, matching };
       });
 
-      return successResponse(res, updated, "요청서가 수정되었습니다.");
+      const message = result.matching.count > 0
+        ? `요청서가 수정되었습니다. 새 조건 기준 후보 ${result.matching.count}명을 바로 추천했습니다.`
+        : "요청서가 수정되었습니다. 새 조건에 맞는 후보를 찾는 중입니다.";
+
+      return successResponse(res, result.request, message);
     } catch (err) {
       next(err);
     }
@@ -341,13 +412,63 @@ router.delete(
         return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
       }
 
-      if (["booked", "completed"].includes(existing.status)) {
-        return errorResponse(res, "FORBIDDEN", "예약 완료 상태의 요청서는 취소할 수 없습니다.", [], 403);
+      if (!REQUEST_CANCEL_ALLOWED_STATUSES.includes(existing.status)) {
+        return errorResponse(
+          res,
+          "FORBIDDEN",
+          "예약 완료, 행사 완료, 후기 등록, 취소 또는 분쟁 상태의 요청서는 취소할 수 없습니다.",
+          [],
+          403
+        );
       }
 
-      await prisma.eventRequest.update({
-        where: { id: req.params.id },
-        data: { status: "canceled" },
+      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        await tx.eventRequest.update({
+          where: { id: req.params.id },
+          data: { status: "canceled" },
+        });
+
+        await tx.recommendation.updateMany({
+          where: {
+            request_id: req.params.id,
+            status: { in: ["draft", "sent", "viewed", "consultation_requested", "selected"] },
+          },
+          data: { status: "rejected" },
+        });
+
+        await tx.quote.updateMany({
+          where: {
+            request_id: req.params.id,
+            status: { in: ["proposed", "accepted"] },
+          },
+          data: { status: "canceled" },
+        });
+
+        const cancelableBookings = await tx.booking.findMany({
+          where: {
+            request_id: req.params.id,
+            booking_status: { in: ["pending", "negotiating", "accepted"] },
+            payment_status: "unpaid",
+          },
+          select: { id: true },
+        });
+
+        const cancelableBookingIds = cancelableBookings.map((booking) => booking.id);
+
+        if (cancelableBookingIds.length > 0) {
+          await tx.booking.updateMany({
+            where: { id: { in: cancelableBookingIds } },
+            data: { booking_status: "canceled", cancel_reason: "고객이 요청서를 취소했습니다." },
+          });
+
+          await tx.contract.updateMany({
+            where: {
+              booking_id: { in: cancelableBookingIds },
+              status: { in: ["draft", "pending_customer", "pending_freelancer"] },
+            },
+            data: { status: "voided" },
+          });
+        }
       });
 
       return successResponse(res, null, "요청서가 취소되었습니다.");
