@@ -243,6 +243,7 @@ model EventRequest {
   travel_required           Boolean       @default(false)
   attachment_url            String?
   description               String?
+  view_count                Int           @default(0)
   status                    RequestStatus @default(submitted)
   created_at                DateTime      @default(now())
   updated_at                DateTime      @updatedAt

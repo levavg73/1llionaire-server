@@ -25,15 +25,17 @@ import {
 const router = Router();
 
 const REQUEST_UPDATE_ALLOWED_STATUSES = ["submitted", "reviewing", "recommending", "recommended"];
-const REQUEST_CANCEL_ALLOWED_STATUSES = ["submitted", "reviewing", "recommending", "recommended", "consulting"];
+const REQUEST_DELETE_ALLOWED_STATUSES = ["submitted", "reviewing", "recommending", "recommended", "consulting"];
 
 function toMatchingRequest(request: {
   id: string;
+  event_title?: string;
   event_type: string;
   event_date: Date;
   start_time: string;
   end_time: string;
   region: string;
+  venue?: string | null;
   budget_min: number | null;
   budget_max: number | null;
   preferred_freelancer_type: string[];
@@ -42,14 +44,18 @@ function toMatchingRequest(request: {
   script_required: boolean;
   rehearsal_required: boolean;
   travel_required: boolean;
+  description?: string | null;
+  attachment_url?: string | null;
 }) {
   return {
     id: request.id,
+    event_title: request.event_title,
     event_type: request.event_type,
     event_date: request.event_date,
     start_time: request.start_time,
     end_time: request.end_time,
     region: request.region,
+    venue: request.venue,
     budget_min: request.budget_min,
     budget_max: request.budget_max,
     preferred_freelancer_type: request.preferred_freelancer_type,
@@ -58,6 +64,8 @@ function toMatchingRequest(request: {
     script_required: request.script_required,
     rehearsal_required: request.rehearsal_required,
     travel_required: request.travel_required,
+    description: request.description,
+    attachment_url: request.attachment_url,
   };
 }
 
@@ -165,22 +173,7 @@ router.post(
 
         const matching = await generateAiRecommendationsForRequest({
           tx,
-          request: {
-            id: request.id,
-            event_type: request.event_type,
-            event_date: request.event_date,
-            start_time: request.start_time,
-            end_time: request.end_time,
-            region: request.region,
-            budget_min: request.budget_min,
-            budget_max: request.budget_max,
-            preferred_freelancer_type: request.preferred_freelancer_type,
-            preferred_styles: request.preferred_styles,
-            required_language: request.required_language,
-            script_required: request.script_required,
-            rehearsal_required: request.rehearsal_required,
-            travel_required: request.travel_required,
-          },
+          request: toMatchingRequest(request),
           recommendedByUserId: req.user!.userId,
           excludedFreelancerIds: preferredFreelancers.map((freelancer) => freelancer.id),
           startingDisplayOrder: preferredFreelancers.length + 1,
@@ -227,9 +220,9 @@ router.get(
       const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>);
       const { status } = requestStatusQuerySchema.parse(req.query);
 
-      const where = {
+      const where: Prisma.EventRequestWhereInput = {
         customer_id: req.user!.userId,
-        ...(status && { status }),
+        ...(status ? { status } : { status: { not: "canceled" } }),
       };
 
       const [items, total] = await Promise.all([
@@ -244,6 +237,8 @@ router.get(
             event_type: true,
             event_date: true,
             region: true,
+            description: true,
+            view_count: true,
             status: true,
             created_at: true,
             updated_at: true,
@@ -305,8 +300,13 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
       }
 
+      const updatedRequest = await prisma.eventRequest.update({
+        where: { id: request.id },
+        data: { view_count: { increment: 1 } } as any,
+      });
+
       const responseRequest = {
-        ...request,
+        ...updatedRequest,
         recommendations: await Promise.all(
           request.recommendations.map(async (recommendation) => ({
             ...recommendation,
@@ -345,7 +345,7 @@ router.patch(
         return errorResponse(
           res,
           "FORBIDDEN",
-          "상담, 예약, 행사 완료 또는 취소 상태의 요청서는 수정할 수 없습니다.",
+          "상담, 예약, 행사 완료 또는 삭제된 요청서는 수정할 수 없습니다.",
           [],
           403
         );
@@ -396,7 +396,7 @@ router.patch(
   }
 );
 
-// ── DELETE /api/customer/requests/:id (상태 변경으로 soft delete) ──
+// ── DELETE /api/customer/requests/:id (요청서 및 관련 초안 데이터 삭제) ──
 
 router.delete(
   "/:id",
@@ -412,66 +412,142 @@ router.delete(
         return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
       }
 
-      if (!REQUEST_CANCEL_ALLOWED_STATUSES.includes(existing.status)) {
+      if (!REQUEST_DELETE_ALLOWED_STATUSES.includes(existing.status)) {
         return errorResponse(
           res,
           "FORBIDDEN",
-          "예약 완료, 행사 완료, 후기 등록, 취소 또는 분쟁 상태의 요청서는 취소할 수 없습니다.",
+          "예약 완료, 행사 완료, 후기 등록, 삭제 또는 분쟁 상태의 요청서는 삭제할 수 없습니다.",
           [],
           403
         );
       }
 
-      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        await tx.eventRequest.update({
-          where: { id: req.params.id },
-          data: { status: "canceled" },
-        });
-
-        await tx.recommendation.updateMany({
-          where: {
-            request_id: req.params.id,
-            status: { in: ["draft", "sent", "viewed", "consultation_requested", "selected"] },
-          },
-          data: { status: "rejected" },
-        });
-
-        await tx.quote.updateMany({
-          where: {
-            request_id: req.params.id,
-            status: { in: ["proposed", "accepted"] },
-          },
-          data: { status: "canceled" },
-        });
-
-        const cancelableBookings = await tx.booking.findMany({
-          where: {
-            request_id: req.params.id,
-            booking_status: { in: ["pending", "negotiating", "accepted"] },
-            payment_status: "unpaid",
-          },
-          select: { id: true },
-        });
-
-        const cancelableBookingIds = cancelableBookings.map((booking) => booking.id);
-
-        if (cancelableBookingIds.length > 0) {
-          await tx.booking.updateMany({
-            where: { id: { in: cancelableBookingIds } },
-            data: { booking_status: "canceled", cancel_reason: "고객이 요청서를 취소했습니다." },
-          });
-
-          await tx.contract.updateMany({
-            where: {
-              booking_id: { in: cancelableBookingIds },
-              status: { in: ["draft", "pending_customer", "pending_freelancer"] },
-            },
-            data: { status: "voided" },
-          });
-        }
+      const relatedBookings = await prisma.booking.findMany({
+        where: { request_id: req.params.id },
+        select: { id: true, booking_status: true, payment_status: true },
       });
 
-      return successResponse(res, null, "요청서가 취소되었습니다.");
+      const protectedBooking = relatedBookings.find(
+        (booking) =>
+          !["pending", "negotiating", "accepted"].includes(booking.booking_status) ||
+          booking.payment_status !== "unpaid"
+      );
+
+      if (protectedBooking) {
+        return errorResponse(
+          res,
+          "FORBIDDEN",
+          "결제 또는 예약이 확정된 요청서는 삭제할 수 없습니다.",
+          [],
+          403
+        );
+      }
+
+      const relatedBookingIds = relatedBookings.map((booking) => booking.id);
+
+      if (relatedBookingIds.length > 0) {
+        const [protectedPaymentCount, reviewCount, freelancerReviewCount, protectedContractCount] = await Promise.all([
+          prisma.payment.count({
+            where: {
+              booking_id: { in: relatedBookingIds },
+              OR: [
+                { status: { in: ["IN_PROGRESS", "WAITING_FOR_DEPOSIT", "DONE", "PARTIAL_CANCELED"] } },
+                { payment_key: { not: null } },
+                { approved_at: { not: null } },
+              ],
+            },
+          }),
+          prisma.review.count({ where: { booking_id: { in: relatedBookingIds } } }),
+          prisma.freelancerReview.count({ where: { booking_id: { in: relatedBookingIds } } }),
+          prisma.contract.count({
+            where: {
+              booking_id: { in: relatedBookingIds },
+              OR: [
+                { status: { not: "draft" } },
+                { customer_signed_at: { not: null } },
+                { freelancer_signed_at: { not: null } },
+                { fully_signed_at: { not: null } },
+              ],
+            },
+          }),
+        ]);
+
+        if (protectedPaymentCount > 0) {
+          return errorResponse(
+            res,
+            "FORBIDDEN",
+            "결제 시도 또는 결제 이력이 있는 요청서는 삭제할 수 없습니다.",
+            [],
+            403
+          );
+        }
+
+        if (reviewCount > 0 || freelancerReviewCount > 0) {
+          return errorResponse(
+            res,
+            "FORBIDDEN",
+            "후기 이력이 있는 요청서는 삭제할 수 없습니다.",
+            [],
+            403
+          );
+        }
+
+        if (protectedContractCount > 0) {
+          return errorResponse(
+            res,
+            "FORBIDDEN",
+            "서명 또는 계약 진행 이력이 있는 요청서는 삭제할 수 없습니다.",
+            [],
+            403
+          );
+        }
+      }
+
+      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        if (relatedBookingIds.length > 0) {
+          const chatRooms = await tx.chatRoom.findMany({
+            where: { booking_id: { in: relatedBookingIds } },
+            select: { id: true },
+          });
+          const chatRoomIds = chatRooms.map((room) => room.id);
+
+          const bookingOffers = await tx.bookingOffer.findMany({
+            where: { booking_id: { in: relatedBookingIds } },
+            select: { id: true },
+          });
+          const bookingOfferIds = bookingOffers.map((offer) => offer.id);
+
+          if (chatRoomIds.length > 0 || bookingOfferIds.length > 0) {
+            await tx.chatMessage.deleteMany({
+              where: {
+                OR: [
+                  ...(chatRoomIds.length > 0 ? [{ room_id: { in: chatRoomIds } }] : []),
+                  ...(bookingOfferIds.length > 0 ? [{ offer_id: { in: bookingOfferIds } }] : []),
+                ],
+              },
+            });
+          }
+
+          await tx.bookingOffer.deleteMany({ where: { booking_id: { in: relatedBookingIds } } });
+          await tx.chatRoom.deleteMany({ where: { booking_id: { in: relatedBookingIds } } });
+          await tx.contract.deleteMany({ where: { booking_id: { in: relatedBookingIds }, status: "draft" } });
+          await tx.payment.deleteMany({
+            where: {
+              booking_id: { in: relatedBookingIds },
+              status: { in: ["READY", "CANCELED", "ABORTED", "EXPIRED"] },
+              payment_key: null,
+              approved_at: null,
+            },
+          });
+          await tx.booking.deleteMany({ where: { id: { in: relatedBookingIds } } });
+        }
+
+        await tx.recommendation.deleteMany({ where: { request_id: req.params.id } });
+        await tx.quote.deleteMany({ where: { request_id: req.params.id } });
+        await tx.eventRequest.delete({ where: { id: req.params.id } });
+      });
+
+      return successResponse(res, null, "요청서가 삭제되었습니다.");
     } catch (err) {
       next(err);
     }
