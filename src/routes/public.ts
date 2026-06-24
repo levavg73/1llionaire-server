@@ -30,6 +30,17 @@ const freelancerListQuerySchema = z
 
 type FreelancerListSort = z.infer<typeof freelancerListQuerySchema>["sort"];
 
+type PublishedReviewStat = {
+  review_count: number;
+  avg_rating: number | null;
+};
+
+type ReviewSummaryTarget = {
+  id: string;
+  avg_rating?: number | null;
+  review_count?: number | null;
+};
+
 const CATEGORY_ALIASES: Record<string, string[]> = {
   "기업행사 MC": ["기업행사 MC", "기업행사"],
   "기업행사MC": ["기업행사 MC", "기업행사"],
@@ -58,6 +69,55 @@ function getFreelancerOrderBy(sort: FreelancerListSort): Prisma.FreelancerProfil
   }
 
   return [{ avg_rating: "desc" }, { review_count: "desc" }, { created_at: "desc" }];
+}
+
+async function getPublishedReviewStats(freelancerIds: string[]): Promise<Map<string, PublishedReviewStat>> {
+  if (freelancerIds.length === 0) return new Map();
+
+  const rows = await prisma.review.groupBy({
+    by: ["freelancer_id"],
+    where: {
+      freelancer_id: { in: freelancerIds },
+      status: "published",
+    },
+    _avg: { total_score: true },
+    _count: { _all: true },
+  });
+
+  return new Map(
+    rows.map((row) => [
+      row.freelancer_id,
+      {
+        review_count: row._count._all,
+        avg_rating: row._avg.total_score === null ? null : Number(row._avg.total_score.toFixed(1)),
+      },
+    ])
+  );
+}
+
+function withPublishedReviewStats<T extends ReviewSummaryTarget>(
+  item: T,
+  statsByFreelancerId: Map<string, PublishedReviewStat>
+): T {
+  const stats = statsByFreelancerId.get(item.id);
+
+  return {
+    ...item,
+    review_count: stats?.review_count ?? 0,
+    avg_rating: stats?.avg_rating ?? null,
+  };
+}
+
+async function resolveApprovedFreelancerProfileId(idOrUserId: string): Promise<string | null> {
+  const profile = await prisma.freelancerProfile.findFirst({
+    where: {
+      status: "approved",
+      OR: [{ id: idOrUserId }, { user_id: idOrUserId }],
+    },
+    select: { id: true },
+  });
+
+  return profile?.id ?? null;
 }
 
 // GET /api/public/freelancers - 승인된 진행자 목록
@@ -137,8 +197,11 @@ router.get(
         prisma.freelancerProfile.count({ where }),
       ]);
 
+      const statsByFreelancerId = await getPublishedReviewStats(items.map((item) => item.id));
       const signedItems = await attachSignedProfileImageUrls(items);
-      const publicItems = signedItems.map(({ profile_image_path, ...item }) => item);
+      const publicItems = signedItems.map(({ profile_image_path, ...item }) =>
+        withPublishedReviewStats(item, statsByFreelancerId)
+      );
 
       return listResponse(res, publicItems, total, page, limit);
     } catch (err) {
@@ -154,7 +217,10 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const profile = await prisma.freelancerProfile.findFirst({
-        where: { id: req.params.id, status: "approved" },
+        where: {
+          status: "approved",
+          OR: [{ id: req.params.id }, { user_id: req.params.id }],
+        },
         select: {
           id: true,
           display_name: true,
@@ -198,7 +264,9 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "진행자를 찾을 수 없습니다.", [], 404);
       }
 
-      const signedProfile = await attachSignedProfileImageUrl(profile);
+      const statsByFreelancerId = await getPublishedReviewStats([profile.id]);
+      const profileWithCurrentStats = withPublishedReviewStats(profile, statsByFreelancerId);
+      const signedProfile = await attachSignedProfileImageUrl(profileWithCurrentStats);
       const { profile_image_path, ...publicProfile } = signedProfile;
 
       return successResponse(res, publicProfile);
@@ -215,9 +283,14 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>);
+      const freelancerProfileId = await resolveApprovedFreelancerProfileId(req.params.id);
+
+      if (!freelancerProfileId) {
+        return listResponse(res, [], 0, page, limit);
+      }
 
       const where = {
-        freelancer_id: req.params.id,
+        freelancer_id: freelancerProfileId,
         status: "published" as const,
       };
 

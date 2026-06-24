@@ -1,8 +1,10 @@
 import { Request, Response, NextFunction } from "express";
 
+const NO_STORE_VALUE = "private, no-store, no-cache, max-age=0, must-revalidate";
+
 export const noStoreForPrivateApi = (req: Request, res: Response, next: NextFunction): void => {
   if (req.path.startsWith("/api") && !req.path.startsWith("/api/public")) {
-    res.setHeader("Cache-Control", "private, no-store, no-cache, max-age=0, must-revalidate");
+    res.setHeader("Cache-Control", NO_STORE_VALUE);
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Expires", "0");
   }
@@ -10,6 +12,13 @@ export const noStoreForPrivateApi = (req: Request, res: Response, next: NextFunc
 };
 
 export const setPublicCache = (_req: Request, res: Response, next: NextFunction): void => {
-  res.setHeader("Cache-Control", "public, max-age=0, s-maxage=60, stale-while-revalidate=300");
+  // Public profile pages and review counts are edited/imported directly during
+  // migrations and admin operations. Serving them through an edge cache can
+  // leave old freelancer IDs, stale review_count values, or deleted profile
+  // details visible in the client, which leads to intermittent 404 pages and
+  // review/count mismatches after a DB handoff. Keep these responses fresh.
+  res.setHeader("Cache-Control", NO_STORE_VALUE);
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
   next();
 };
