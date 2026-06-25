@@ -721,6 +721,8 @@ async function callGeminiWithParts(
         temperature: 0.35,
         maxOutputTokens,
         responseMimeType: "application/json",
+        // gemini-2.5-flash 추론 비활성화로 지연 감소 (Vercel 함수 시간 절약)
+        thinkingConfig: { thinkingBudget: 0 },
       },
     },
     {

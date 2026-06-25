@@ -87,6 +87,11 @@ interface GeminiCallOptions {
   responseMimeType?: "application/json" | "text/plain";
   responseSchema?: Record<string, unknown>;
   temperature?: number;
+  // gemini-2.5-flash 추론(thinking) 토큰 제어.
+  // 0이면 thinking 비활성화 → 정형 작업 응답 속도/지연 대폭 개선.
+  thinkingBudget?: number;
+  // 호출별 타임아웃(ms). Vercel 함수 시간 예산 분배에 사용.
+  timeoutMs?: number;
 }
 
 type GeminiErrorDetail = {
@@ -163,6 +168,9 @@ async function callGemini(
       generationConfig: {
         maxOutputTokens: options.maxOutputTokens ?? 1500,
         temperature: options.temperature ?? 0.25,
+        ...(options.thinkingBudget !== undefined
+          ? { thinkingConfig: { thinkingBudget: options.thinkingBudget } }
+          : {}),
         ...(options.responseMimeType
           ? { responseMimeType: options.responseMimeType }
           : {}),
@@ -176,7 +184,9 @@ async function callGemini(
         "x-goog-api-key": apiKey,
         "Content-Type": "application/json",
       },
-      timeout: 30_000,
+      // Vercel 함수 한도(Hobby 10s)보다 짧게 잡아 코드가 먼저 에러를 잡도록 함.
+      // 504 강제종료 대신 깔끔한 에러 메시지를 화면에 표시할 수 있음.
+      timeout: options.timeoutMs ?? 9_000,
     },
   );
 
@@ -271,7 +281,11 @@ router.get(
       const raw = await callGemini(
         '{"ok":true,"service":"gemini"} JSON만 반환하세요.',
         "반드시 JSON 객체만 반환하세요. 마크다운과 설명문은 금지입니다.",
-        { maxOutputTokens: 64, responseMimeType: "application/json" },
+        {
+          maxOutputTokens: 64,
+          responseMimeType: "application/json",
+          thinkingBudget: 0,
+        },
       );
       const parsed = parseJsonObject<Record<string, unknown>>(raw);
 
@@ -651,15 +665,16 @@ router.post(
 제공된 시장 데이터와 요청 조건을 바탕으로 단위 항목별 적정 단가를 분석합니다.
 고객 예산에 억지로 맞추지 말고, 행사 시간·요구 경력·지역·분야·플랫폼 시장 단가 기준으로 예산이 현실적인지 판단합니다.
 
-반드시 아래 JSON 형식으로만 응답하세요:
+응답은 간결해야 합니다. line_items는 최대 5개, assumptions와 caution_notes는 각각 최대 2개로 제한하세요.
+설명문이나 마크다운 없이 아래 JSON 객체만 반환하세요:
 {
-  "event_summary": "<행사 조건 요약, 100자 이내>",
+  "event_summary": "<행사 조건 요약, 80자 이내>",
   "line_items": [
     {
       "name": "<항목명, 예: 사전 미팅>",
-      "description": "<항목 설명, 50자 이내>",
+      "description": "<항목 설명, 40자 이내>",
       "estimated_price": <예상 금액 (원, 정수)>,
-      "reason": "<산정 근거, 80자 이내>"
+      "reason": "<산정 근거, 50자 이내>"
     }
   ],
   "recommended_min": <최소 추천 총액 (원, 정수)>,
@@ -668,23 +683,15 @@ router.post(
   "confidence": "<high|medium|low>",
   "budget_realism": {
     "status": "<below_market|within_market|above_market|unknown>",
-    "message": "<고객 예산이 시장/시간/경력 조건상 현실적인지 판단>",
-    "recommended_action": "<예산 상향, 조건 조정, 상위 후보 가능성 등 다음 행동>"
+    "message": "<예산 현실성 판단, 60자 이내>",
+    "recommended_action": "<다음 행동, 60자 이내>"
   },
-  "assumptions": ["<가정 1>", "<가정 2>"],
-  "caution_notes": ["<주의사항 1>", "<주의사항 2>"],
+  "assumptions": ["<가정, 40자 이내>"],
+  "caution_notes": ["<주의사항, 40자 이내>"],
   "generated_at": "<ISO 8601 현재 시각>"
 }
 
-VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
-- 사전 미팅 (20~50만원)
-- 대본 검토/작성 (20~80만원)
-- 리허설 참석 (10~50만원)
-- 본행사 진행 (행사 핵심 비용)
-- 출장/이동비 (지역별 차등)
-- 외국어 진행 추가 (영어 +30%, 기타 +20%)
-- 라이브커머스 상품 사전 숙지 (10~30만원)
-- 현장 변수 대응 (기본 포함 또는 별도)`;
+단위 항목 예시 (해당 조건에 맞는 것만 선택): 사전 미팅(20~50만), 대본 검토/작성(20~80만), 리허설(10~50만), 본행사 진행(핵심 비용), 출장/이동(지역별), 외국어 진행(영어 +30%·기타 +20%), 라이브커머스 상품 숙지(10~30만), 현장 변수 대응.`;
 
       const prompt = `
 ## 행사 조건
@@ -718,34 +725,51 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
       let analysis: PricingAnalysisResult | undefined;
       let geminiError: GeminiErrorDetail | null = null;
 
-      // 재시도 전략: 1차 JSON 모드 → 2차 일반 텍스트 모드 → fallback
-      // (AI 후보 추천도 이미지 포함 → 텍스트 전용 2회 시도 후 fallback)
+      // Gemini 호출 전체 시간 예산 (Vercel 함수 한도보다 안전 마진 확보).
+      // 환경변수 AI_GEMINI_BUDGET_MS로 조정 가능 (기본 9초).
+      const TOTAL_GEMINI_BUDGET_MS = Number(
+        process.env.AI_GEMINI_BUDGET_MS ?? 9_000,
+      );
+      const MIN_ATTEMPT_MS = 3_000; // 이보다 시간이 적게 남으면 재시도 생략
+      const deadline = Date.now() + TOTAL_GEMINI_BUDGET_MS;
+
+      // 재시도 전략 (Vercel 함수 시간 제약 대응으로 경량화):
+      // - thinkingBudget: 0 → gemini-2.5-flash 추론 비활성화로 지연 대폭 감소
+      // - maxOutputTokens 축소 → 단가 분석 JSON은 ~800토큰이면 충분
+      // - 남은 시간 예산 안에서만 재시도 (전체 합이 함수 한도 초과 방지)
       const callStrategies = [
         {
           label: "json-mode",
           options: {
-            maxOutputTokens: 4096,
+            maxOutputTokens: 1024,
             responseMimeType: "application/json" as const,
             temperature: 0.15,
+            thinkingBudget: 0,
           },
         },
         {
           label: "text-mode-retry",
           options: {
-            maxOutputTokens: 4096,
+            maxOutputTokens: 1024,
             temperature: 0.25,
+            thinkingBudget: 0,
             // responseMimeType 생략 → 시스템 프롬프트의 JSON 지시에 의존
           },
         },
       ];
 
       for (const strategy of callStrategies) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs < MIN_ATTEMPT_MS) {
+          // 남은 시간이 부족하면 더 시도하지 않고 fallback으로 넘어감
+          break;
+        }
+
         try {
-          const rawResponse = await callGemini(
-            prompt,
-            systemPrompt,
-            strategy.options,
-          );
+          const rawResponse = await callGemini(prompt, systemPrompt, {
+            ...strategy.options,
+            timeoutMs: remainingMs,
+          });
 
           analysis = parsePricingJson(rawResponse);
           // 성공 → 루프 탈출
@@ -758,6 +782,7 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
             {
               request_id: body.request_id,
               strategy: strategy.label,
+              remaining_ms: remainingMs,
               gemini_key_configured: Boolean(
                 env.GEMINI_API_KEY || env.GOOGLE_API_KEY,
               ),
