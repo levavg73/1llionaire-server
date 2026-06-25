@@ -720,9 +720,8 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
 
       try {
         const rawResponse = await callGemini(prompt, systemPrompt, {
-          maxOutputTokens: 1800,
+          maxOutputTokens: 4096,
           responseMimeType: "application/json",
-          responseSchema: pricingAnalysisResponseSchema,
           temperature: 0.15,
         });
 
