@@ -83,6 +83,49 @@ interface GeminiCallOptions {
   responseMimeType?: "application/json" | "text/plain";
 }
 
+type GeminiErrorDetail = {
+  message: string;
+  status?: number;
+  statusText?: string;
+  code?: string;
+  providerStatus?: string;
+  providerMessage?: string;
+  providerCode?: number;
+  url?: string;
+  timeout?: number;
+};
+
+function getGeminiErrorDetail(error: unknown): GeminiErrorDetail {
+  if (axios.isAxiosError(error)) {
+    const data = error.response?.data as
+      | { error?: { code?: number; message?: string; status?: string } }
+      | undefined;
+
+    return {
+      message: error.message,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      code: error.code,
+      providerStatus: data?.error?.status,
+      providerMessage: data?.error?.message,
+      providerCode: data?.error?.code,
+      url: error.config?.url,
+      timeout: error.config?.timeout,
+    };
+  }
+
+  return {
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function logGeminiError(label: string, error: unknown, meta: Record<string, unknown> = {}) {
+  console.error(label, {
+    ...meta,
+    gemini_error: getGeminiErrorDetail(error),
+  });
+}
+
 // ─── Gemini API 헬퍼 ─────────────────────────────────────────
 
 async function callGemini(
@@ -154,6 +197,48 @@ function parsePricingJson(raw: string): PricingAnalysisResult {
   return JSON.parse(jsonStr.trim()) as PricingAnalysisResult;
 }
 
+// ─── GET /api/ai/health ─────────────────────────────────────
+// 관리자: Gemini 키/모델/응답 형식만 분리해서 진단합니다.
+
+router.get(
+  "/health",
+  requireAdmin,
+  async (_req: AuthRequest, res: Response) => {
+    try {
+      const raw = await callGemini(
+        "{\"ok\":true,\"service\":\"gemini\"} JSON만 반환하세요.",
+        "반드시 JSON 객체만 반환하세요. 마크다운과 설명문은 금지입니다.",
+        { maxOutputTokens: 64, responseMimeType: "application/json" }
+      );
+      const parsed = JSON.parse((raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] ?? raw).trim()) as Record<string, unknown>;
+
+      return successResponse(res, {
+        configured: Boolean(env.GEMINI_API_KEY || env.GOOGLE_API_KEY),
+        model: env.GEMINI_MODEL,
+        ok: true,
+        provider_response: parsed,
+      });
+    } catch (error) {
+      const detail = getGeminiErrorDetail(error);
+      console.error("[gemini-health-check-failed]", { gemini_error: detail });
+
+      return errorResponse(
+        res,
+        "GEMINI_HEALTH_CHECK_FAILED",
+        "Gemini 연결 확인에 실패했습니다. 서버 환경변수와 API 키 권한을 확인해 주세요.",
+        [
+          {
+            configured: Boolean(env.GEMINI_API_KEY || env.GOOGLE_API_KEY),
+            model: env.GEMINI_MODEL,
+            gemini_error: detail,
+          },
+        ],
+        503
+      );
+    }
+  }
+);
+
 // ─── POST /api/ai/pricing-analysis ───────────────────────────
 
 const pricingSchema = z.object({
@@ -164,6 +249,16 @@ const pricingSchema = z.object({
   budget_min: z.number().int().min(0).optional(),
   budget_max: z.number().int().min(0).optional(),
   duration_hours: z.number().min(0.5).max(24).optional(),
+  event_date: z.string().max(30).optional(),
+  start_time: z.string().max(10).optional(),
+  end_time: z.string().max(10).optional(),
+  venue: z.string().max(200).optional(),
+  description: z.string().max(3000).optional(),
+  preferred_styles: z.array(z.string()).max(20).optional(),
+  required_language: z.string().max(50).optional(),
+  script_required: z.boolean().optional(),
+  rehearsal_required: z.boolean().optional(),
+  travel_required: z.boolean().optional(),
   request_id: z.string().optional(),
 });
 
@@ -274,35 +369,62 @@ function buildFallbackPricingAnalysis(
   );
   const recommendedMaxBaseline = recommendedCenter * 1.15;
   const recommendedMax = roundToTenThousand(
-    Math.max(
-      recommendedMin,
-      body.budget_max ? Math.min(body.budget_max, recommendedMaxBaseline) : recommendedMaxBaseline
-    )
+    Math.max(recommendedMin, recommendedMaxBaseline)
   );
 
   const lineItems: LineItem[] = [
     {
       name: "본행사 진행",
       description: `${durationHours}시간 기준 핵심 진행 비용`,
-      estimated_price: roundToTenThousand(recommendedCenter * 0.7),
+      estimated_price: roundToTenThousand(recommendedCenter * 0.62),
       reason: "유사 진행자 평균 단가와 행사 시간을 반영",
     },
     {
       name: "사전 미팅/큐시트 확인",
       description: "행사 흐름 및 진행 톤 사전 조율",
-      estimated_price: roundToTenThousand(recommendedCenter * 0.15),
+      estimated_price: roundToTenThousand(recommendedCenter * 0.12),
       reason: "행사 완성도 확보를 위한 기본 준비 비용",
     },
+    ...(body.script_required
+      ? [
+          {
+            name: "대본 검토/작성",
+            description: "행사 대본과 큐시트 사전 준비",
+            estimated_price: roundToTenThousand(recommendedCenter * 0.1),
+            reason: "대본 작성 또는 검토 요청 조건 반영",
+          },
+        ]
+      : []),
+    ...(body.rehearsal_required
+      ? [
+          {
+            name: "리허설 참석",
+            description: "현장 또는 온라인 리허설 참여",
+            estimated_price: roundToTenThousand(recommendedCenter * 0.08),
+            reason: "리허설 필요 조건 반영",
+          },
+        ]
+      : []),
+    ...(body.travel_required
+      ? [
+          {
+            name: "출장/이동 대응",
+            description: "지역 이동 및 현장 도착 리스크",
+            estimated_price: roundToTenThousand(recommendedCenter * 0.06),
+            reason: "출장 필요 조건 반영",
+          },
+        ]
+      : []),
     {
       name: "현장 변수 대응",
       description: "현장 상황 대응 및 진행 보정",
-      estimated_price: roundToTenThousand(recommendedCenter * 0.15),
+      estimated_price: roundToTenThousand(recommendedCenter * 0.12),
       reason: "현장형 진행 업무의 리스크 비용 반영",
     },
   ];
 
   return {
-    event_summary: `${body.region} ${body.event_type} / ${body.categories.join(", ")}`.slice(0, 100),
+    event_summary: `${body.region} ${body.event_type} / ${body.categories.join(", ")}${body.description ? ` / ${body.description}` : ""}`.slice(0, 100),
     line_items: lineItems,
     recommended_min: recommendedMin,
     recommended_max: recommendedMax,
@@ -401,6 +523,14 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
 - 최소 경력: ${body.career_years_min ?? 0}년 이상
 - 고객 예산: ${body.budget_min ? `${body.budget_min.toLocaleString("ko-KR")}원` : "미설정"} ~ ${body.budget_max ? `${body.budget_max.toLocaleString("ko-KR")}원` : "미설정"}
 - 진행 시간: ${body.duration_hours ?? "미정"}시간
+- 행사 날짜/시간: ${body.event_date ?? "미정"} ${body.start_time ?? ""}~${body.end_time ?? ""}
+- 상세 장소: ${body.venue || "미정"}
+- 선호 스타일: ${body.preferred_styles?.join(", ") || "미정"}
+- 필요 언어: ${body.required_language || "한국어"}
+- 대본 작성 필요: ${body.script_required ? "예" : "아니오"}
+- 리허설 필요: ${body.rehearsal_required ? "예" : "아니오"}
+- 출장 필요: ${body.travel_required ? "예" : "아니오"}
+- 요청사항: ${body.description || "없음"}
 
 ## 플랫폼 시장 데이터 (${marketData.sample_count}명 기준)
 - 평균 최소 단가: ${marketData.avg_price_min.toLocaleString("ko-KR")}원
@@ -415,16 +545,15 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
 
       let analysisSource: "gemini" | "market_fallback" = "gemini";
       let analysis: PricingAnalysisResult;
+      let geminiError: GeminiErrorDetail | null = null;
 
       try {
         const rawResponse = await callGemini(prompt, systemPrompt, { responseMimeType: "application/json" });
         analysis = parsePricingJson(rawResponse);
       } catch (aiError) {
         analysisSource = "market_fallback";
-        console.error("[ai-pricing-analysis-fallback]", {
-          request_id: body.request_id,
-          message: aiError instanceof Error ? aiError.message : String(aiError),
-        });
+        geminiError = getGeminiErrorDetail(aiError);
+        logGeminiError("[ai-pricing-analysis-fallback]", aiError, { request_id: body.request_id });
         analysis = buildFallbackPricingAnalysis(body, marketData);
       }
 
@@ -450,6 +579,14 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
       return successResponse(res, {
         analysis,
         market_data: { ...marketData, analysis_source: analysisSource },
+        diagnostic: geminiError
+          ? {
+              analysis_source: analysisSource,
+              gemini_status: geminiError.status,
+              gemini_provider_status: geminiError.providerStatus,
+              gemini_error_message: geminiError.providerMessage ?? geminiError.message,
+            }
+          : { analysis_source: analysisSource },
       });
     } catch (err) {
       next(err);
@@ -648,7 +785,15 @@ router.post(
       return successResponse(res, { reason: reason.trim() });
     } catch (err) {
       if (axios.isAxiosError(err) && err.config?.url?.includes("generativelanguage")) {
-        return errorResponse(res, "SERVER_ERROR", "AI 서비스 오류가 발생했습니다.", [], 503);
+        const detail = getGeminiErrorDetail(err);
+        console.error("[ai-recommendation-reason-failed]", { gemini_error: detail });
+        return errorResponse(
+          res,
+          "GEMINI_REQUEST_FAILED",
+          "AI 서비스 오류가 발생했습니다. Gemini 연결 상태를 확인해 주세요.",
+          [detail],
+          503
+        );
       }
       next(err);
     }

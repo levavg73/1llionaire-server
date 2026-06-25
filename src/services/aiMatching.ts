@@ -154,6 +154,49 @@ type AiRecommendationResponse =
   | { recommendations?: AiRecommendationItem[]; items?: AiRecommendationItem[]; results?: AiRecommendationItem[] }
   | AiRecommendationItem[];
 
+type GeminiErrorDetail = {
+  message: string;
+  status?: number;
+  statusText?: string;
+  code?: string;
+  providerStatus?: string;
+  providerMessage?: string;
+  providerCode?: number;
+  url?: string;
+  timeout?: number;
+};
+
+function getGeminiErrorDetail(error: unknown): GeminiErrorDetail {
+  if (axios.isAxiosError(error)) {
+    const data = error.response?.data as
+      | { error?: { code?: number; message?: string; status?: string } }
+      | undefined;
+
+    return {
+      message: error.message,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      code: error.code,
+      providerStatus: data?.error?.status,
+      providerMessage: data?.error?.message,
+      providerCode: data?.error?.code,
+      url: error.config?.url,
+      timeout: error.config?.timeout,
+    };
+  }
+
+  return {
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function logGeminiError(label: string, error: unknown, meta: Record<string, unknown> = {}) {
+  console.error(label, {
+    ...meta,
+    gemini_error: getGeminiErrorDetail(error),
+  });
+}
+
 
 function normalize(value?: string | null) {
   return (value ?? "")
@@ -399,7 +442,10 @@ async function fetchImageAsGeminiPart(url: string): Promise<GeminiContentPart | 
       },
     };
   } catch (err) {
-    console.warn("[ai-recommendation-image-fetch-failed]", { url, err });
+    console.warn("[ai-recommendation-image-fetch-failed]", {
+      url,
+      error: axios.isAxiosError(err) ? getGeminiErrorDetail(err) : err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }
@@ -748,11 +794,12 @@ async function buildAiRecommendationDrafts(
       throw new Error("Gemini API returned no recommendation items");
     } catch (err) {
       lastError = err;
-      console.error(
+      logGeminiError(
         includeImages
           ? "[ai-recommendation-with-images-failed] retrying text-only"
           : "[ai-recommendation-text-only-failed] using local rich reasons",
-        err
+        err,
+        { request_id: request.id, include_images: includeImages }
       );
     }
   }
@@ -795,7 +842,23 @@ async function buildAiRecommendationDrafts(
   }
 
   if (drafts.length === 0) {
-    console.error("[ai-recommendation-no-valid-ai-reasons]", lastError);
+    console.error("[ai-recommendation-no-valid-ai-reasons]", {
+      request_id: request.id,
+      gemini_error: lastError ? getGeminiErrorDetail(lastError) : null,
+      ai_recommendation_count: aiRecommendations.length,
+    });
+  }
+
+  if (drafts.length < TOP_RECOMMENDATION_COUNT) {
+    const remainingLocalDrafts = ranked
+      .filter((item) => !selectedIds.has(item.candidate.id))
+      .slice(0, TOP_RECOMMENDATION_COUNT - drafts.length)
+      .map((scored) => ({
+        scored,
+        recommendationReason: buildRecommendationReason(scored, request),
+      }));
+
+    drafts.push(...remainingLocalDrafts);
   }
 
   return drafts.slice(0, TOP_RECOMMENDATION_COUNT);
@@ -984,7 +1047,14 @@ export async function generateAiRecommendationsForRequest(params: {
   const recommendationDrafts = await buildAiRecommendationDrafts(request, ranked);
 
   if (recommendationDrafts.length === 0) {
-    throw new Error("AI_RECOMMENDATION_REASON_GENERATION_FAILED");
+    console.error("[ai-recommendation-empty-after-local-fallback]", {
+      request_id: request.id,
+      ranked_count: ranked.length,
+    });
+    return {
+      count: 0,
+      status: "submitted",
+    };
   }
 
   await prisma.recommendation.createMany({
