@@ -715,35 +715,61 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
 진행 시간이 길거나 최소 경력이 높으면 본행사 진행비와 준비비를 현실적으로 상향 반영하세요.`;
 
       let analysisSource: "gemini" | "market_fallback" = "gemini";
-      let analysis: PricingAnalysisResult;
+      let analysis: PricingAnalysisResult | undefined;
       let geminiError: GeminiErrorDetail | null = null;
 
-      try {
-        const rawResponse = await callGemini(prompt, systemPrompt, {
-          maxOutputTokens: 4096,
-          responseMimeType: "application/json",
-          temperature: 0.15,
-        });
+      // 재시도 전략: 1차 JSON 모드 → 2차 일반 텍스트 모드 → fallback
+      // (AI 후보 추천도 이미지 포함 → 텍스트 전용 2회 시도 후 fallback)
+      const callStrategies = [
+        {
+          label: "json-mode",
+          options: {
+            maxOutputTokens: 4096,
+            responseMimeType: "application/json" as const,
+            temperature: 0.15,
+          },
+        },
+        {
+          label: "text-mode-retry",
+          options: {
+            maxOutputTokens: 4096,
+            temperature: 0.25,
+            // responseMimeType 생략 → 시스템 프롬프트의 JSON 지시에 의존
+          },
+        },
+      ];
 
+      for (const strategy of callStrategies) {
         try {
+          const rawResponse = await callGemini(
+            prompt,
+            systemPrompt,
+            strategy.options,
+          );
+
           analysis = parsePricingJson(rawResponse);
-        } catch (parseError) {
-          console.error("[ai-pricing-analysis-parse-failed]", {
-            request_id: body.request_id,
-            message:
-              parseError instanceof Error
-                ? parseError.message
-                : String(parseError),
-            raw_response_preview: rawResponse.slice(0, 1000),
-          });
-          throw parseError;
+          // 성공 → 루프 탈출
+          break;
+        } catch (err) {
+          geminiError = getGeminiErrorDetail(err);
+          logGeminiError(
+            `[ai-pricing-analysis-${strategy.label}-failed]`,
+            err,
+            {
+              request_id: body.request_id,
+              strategy: strategy.label,
+              gemini_key_configured: Boolean(
+                env.GEMINI_API_KEY || env.GOOGLE_API_KEY,
+              ),
+              gemini_model: env.GEMINI_MODEL,
+            },
+          );
         }
-      } catch (aiError) {
+      }
+
+      // 모든 시도 실패 시 fallback
+      if (!analysis) {
         analysisSource = "market_fallback";
-        geminiError = getGeminiErrorDetail(aiError);
-        logGeminiError("[ai-pricing-analysis-fallback]", aiError, {
-          request_id: body.request_id,
-        });
         analysis = buildFallbackPricingAnalysis(body, marketData);
       }
 
