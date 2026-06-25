@@ -35,7 +35,11 @@ export interface LineItem {
 
 export type Confidence = "high" | "medium" | "low";
 
-export type BudgetRealismStatus = "below_market" | "within_market" | "above_market" | "unknown";
+export type BudgetRealismStatus =
+  | "below_market"
+  | "within_market"
+  | "above_market"
+  | "unknown";
 
 export interface PricingAnalysisResult {
   event_summary: string;
@@ -81,6 +85,8 @@ interface GeminiGenerateContentResponse {
 interface GeminiCallOptions {
   maxOutputTokens?: number;
   responseMimeType?: "application/json" | "text/plain";
+  responseSchema?: Record<string, unknown>;
+  temperature?: number;
 }
 
 type GeminiErrorDetail = {
@@ -119,7 +125,11 @@ function getGeminiErrorDetail(error: unknown): GeminiErrorDetail {
   };
 }
 
-function logGeminiError(label: string, error: unknown, meta: Record<string, unknown> = {}) {
+function logGeminiError(
+  label: string,
+  error: unknown,
+  meta: Record<string, unknown> = {},
+) {
   console.error(label, {
     ...meta,
     gemini_error: getGeminiErrorDetail(error),
@@ -131,7 +141,7 @@ function logGeminiError(label: string, error: unknown, meta: Record<string, unkn
 async function callGemini(
   prompt: string,
   systemPrompt: string,
-  options: GeminiCallOptions = {}
+  options: GeminiCallOptions = {},
 ): Promise<string> {
   const apiKey = requireGeminiKey();
   const modelPath = env.GEMINI_MODEL.startsWith("models/")
@@ -152,8 +162,12 @@ async function callGemini(
       },
       generationConfig: {
         maxOutputTokens: options.maxOutputTokens ?? 1500,
+        temperature: options.temperature ?? 0.25,
         ...(options.responseMimeType
           ? { responseMimeType: options.responseMimeType }
+          : {}),
+        ...(options.responseSchema
+          ? { responseSchema: options.responseSchema }
           : {}),
       },
     },
@@ -163,7 +177,7 @@ async function callGemini(
         "Content-Type": "application/json",
       },
       timeout: 30_000,
-    }
+    },
   );
 
   if (response.data.error) {
@@ -172,7 +186,7 @@ async function callGemini(
 
   if (response.data.promptFeedback?.blockReason) {
     throw new Error(
-      `Gemini API blocked the prompt: ${response.data.promptFeedback.blockReason}`
+      `Gemini API blocked the prompt: ${response.data.promptFeedback.blockReason}`,
     );
   }
 
@@ -191,10 +205,59 @@ async function callGemini(
   return textBlocks;
 }
 
+function stripJsonCodeFence(raw: string) {
+  return raw
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+
+function extractJsonObject(raw: string) {
+  const cleaned = stripJsonCodeFence(raw);
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+
+  if (first === -1 || last === -1 || last <= first) {
+    throw new Error("Gemini response does not contain a JSON object");
+  }
+
+  return cleaned.slice(first, last + 1).trim();
+}
+
+function removeTrailingCommas(json: string) {
+  return json.replace(/,\s*([}\]])/g, "$1");
+}
+
+function quoteUnquotedObjectKeys(json: string) {
+  return json.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":');
+}
+
+function parseJsonObject<T>(raw: string): T {
+  const extracted = extractJsonObject(raw);
+  const candidates = [
+    extracted,
+    removeTrailingCommas(extracted),
+    quoteUnquotedObjectKeys(removeTrailingCommas(extracted)),
+  ];
+
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to parse Gemini JSON response");
+}
+
 function parsePricingJson(raw: string): PricingAnalysisResult {
-  const jsonMatch = raw.match(/```json\s*([\s\S]*?)```/) ?? raw.match(/({[\s\S]*})/);
-  const jsonStr = jsonMatch ? jsonMatch[1] : raw;
-  return JSON.parse(jsonStr.trim()) as PricingAnalysisResult;
+  return parseJsonObject<PricingAnalysisResult>(raw);
 }
 
 // ─── GET /api/ai/health ─────────────────────────────────────
@@ -206,11 +269,11 @@ router.get(
   async (_req: AuthRequest, res: Response) => {
     try {
       const raw = await callGemini(
-        "{\"ok\":true,\"service\":\"gemini\"} JSON만 반환하세요.",
+        '{"ok":true,"service":"gemini"} JSON만 반환하세요.',
         "반드시 JSON 객체만 반환하세요. 마크다운과 설명문은 금지입니다.",
-        { maxOutputTokens: 64, responseMimeType: "application/json" }
+        { maxOutputTokens: 64, responseMimeType: "application/json" },
       );
-      const parsed = JSON.parse((raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] ?? raw).trim()) as Record<string, unknown>;
+      const parsed = parseJsonObject<Record<string, unknown>>(raw);
 
       return successResponse(res, {
         configured: Boolean(env.GEMINI_API_KEY || env.GOOGLE_API_KEY),
@@ -233,10 +296,10 @@ router.get(
             gemini_error: detail,
           },
         ],
-        503
+        503,
       );
     }
-  }
+  },
 );
 
 // ─── POST /api/ai/pricing-analysis ───────────────────────────
@@ -273,6 +336,57 @@ type PricingMarketData = {
   avg_rating: string;
 };
 
+const pricingAnalysisResponseSchema = {
+  type: "object",
+  properties: {
+    event_summary: { type: "string" },
+    line_items: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          description: { type: "string" },
+          estimated_price: { type: "integer" },
+          reason: { type: "string" },
+        },
+        required: ["name", "description", "estimated_price", "reason"],
+      },
+    },
+    recommended_min: { type: "integer" },
+    recommended_max: { type: "integer" },
+    recommended_center: { type: "integer" },
+    confidence: { type: "string", enum: ["high", "medium", "low"] },
+    budget_realism: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["below_market", "within_market", "above_market", "unknown"],
+        },
+        message: { type: "string" },
+        recommended_action: { type: "string" },
+      },
+      required: ["status", "message", "recommended_action"],
+    },
+    assumptions: { type: "array", items: { type: "string" } },
+    caution_notes: { type: "array", items: { type: "string" } },
+    generated_at: { type: "string" },
+  },
+  required: [
+    "event_summary",
+    "line_items",
+    "recommended_min",
+    "recommended_max",
+    "recommended_center",
+    "confidence",
+    "budget_realism",
+    "assumptions",
+    "caution_notes",
+    "generated_at",
+  ],
+} satisfies Record<string, unknown>;
+
 function roundToTenThousand(value: number) {
   return Math.max(0, Math.round(value / 10_000) * 10_000);
 }
@@ -282,28 +396,40 @@ function buildBudgetRealism(
   marketData: PricingMarketData,
   recommendedMin: number,
   recommendedMax: number,
-  recommendedCenter: number
+  recommendedCenter: number,
 ): PricingAnalysisResult["budget_realism"] {
   const hasBudget = Boolean(body.budget_min || body.budget_max);
   if (!hasBudget) {
     return {
       status: "unknown",
-      message: "고객 예산이 입력되지 않아 시장 단가 기준으로 적정 범위를 산정했습니다.",
-      recommended_action: "추천 범위를 기준으로 예산을 설정한 뒤 후보와 세부 조건을 조율하세요.",
+      message:
+        "고객 예산이 입력되지 않아 시장 단가 기준으로 적정 범위를 산정했습니다.",
+      recommended_action:
+        "추천 범위를 기준으로 예산을 설정한 뒤 후보와 세부 조건을 조율하세요.",
     };
   }
 
   const budgetMin = body.budget_min ?? 0;
   const budgetMax = body.budget_max ?? body.budget_min ?? 0;
-  const marketCenter = marketData.avg_price_min || marketData.avg_price_max
-    ? Math.round(((marketData.avg_price_min || marketData.market_min || recommendedCenter) + (marketData.avg_price_max || marketData.market_max || recommendedCenter)) / 2)
-    : recommendedCenter;
+  const marketCenter =
+    marketData.avg_price_min || marketData.avg_price_max
+      ? Math.round(
+          ((marketData.avg_price_min ||
+            marketData.market_min ||
+            recommendedCenter) +
+            (marketData.avg_price_max ||
+              marketData.market_max ||
+              recommendedCenter)) /
+            2,
+        )
+      : recommendedCenter;
 
   if (budgetMax > 0 && budgetMax < recommendedMin) {
     return {
       status: "below_market",
       message: `입력 예산 상한 ${budgetMax.toLocaleString("ko-KR")}원은 산정된 적정 최소 단가 ${recommendedMin.toLocaleString("ko-KR")}원보다 낮습니다.`,
-      recommended_action: "예산을 상향하거나 행사 시간, 대본/리허설, 출장 범위를 줄여 조건을 조정하는 편이 현실적입니다.",
+      recommended_action:
+        "예산을 상향하거나 행사 시간, 대본/리허설, 출장 범위를 줄여 조건을 조정하는 편이 현실적입니다.",
     };
   }
 
@@ -311,26 +437,42 @@ function buildBudgetRealism(
     return {
       status: "above_market",
       message: `입력 예산은 유사 시장 단가 중심값 ${marketCenter.toLocaleString("ko-KR")}원보다 여유가 있습니다.`,
-      recommended_action: "상위 경력자, 외국어 진행, 대본 작성, 리허설 포함 조건으로 후보 품질을 높일 수 있습니다.",
+      recommended_action:
+        "상위 경력자, 외국어 진행, 대본 작성, 리허설 포함 조건으로 후보 품질을 높일 수 있습니다.",
     };
   }
 
   return {
     status: "within_market",
-    message: "입력 예산은 플랫폼 시장 데이터와 행사 조건을 기준으로 현실적인 범위에 있습니다.",
-    recommended_action: "현재 예산 범위 안에서 경력, 후기, 포트폴리오가 맞는 후보를 우선 비교하세요.",
+    message:
+      "입력 예산은 플랫폼 시장 데이터와 행사 조건을 기준으로 현실적인 범위에 있습니다.",
+    recommended_action:
+      "현재 예산 범위 안에서 경력, 후기, 포트폴리오가 맞는 후보를 우선 비교하세요.",
   };
 }
 
 function normalizePricingAnalysis(
   analysis: PricingAnalysisResult,
   body: PricingRequestBody,
-  marketData: PricingMarketData
+  marketData: PricingMarketData,
 ): PricingAnalysisResult {
   const fallback = buildFallbackPricingAnalysis(body, marketData);
-  const recommendedCenter = roundToTenThousand(Number(analysis.recommended_center) || fallback.recommended_center);
-  const recommendedMin = roundToTenThousand(Number(analysis.recommended_min) || fallback.recommended_min || recommendedCenter);
-  const recommendedMax = roundToTenThousand(Math.max(Number(analysis.recommended_max) || fallback.recommended_max || recommendedCenter, recommendedMin));
+  const recommendedCenter = roundToTenThousand(
+    Number(analysis.recommended_center) || fallback.recommended_center,
+  );
+  const recommendedMin = roundToTenThousand(
+    Number(analysis.recommended_min) ||
+      fallback.recommended_min ||
+      recommendedCenter,
+  );
+  const recommendedMax = roundToTenThousand(
+    Math.max(
+      Number(analysis.recommended_max) ||
+        fallback.recommended_max ||
+        recommendedCenter,
+      recommendedMin,
+    ),
+  );
 
   return {
     ...analysis,
@@ -338,38 +480,52 @@ function normalizePricingAnalysis(
     recommended_min: recommendedMin,
     recommended_max: recommendedMax,
     recommended_center: recommendedCenter,
-    confidence: ["high", "medium", "low"].includes(analysis.confidence) ? analysis.confidence : "medium",
+    confidence: ["high", "medium", "low"].includes(analysis.confidence)
+      ? analysis.confidence
+      : "medium",
     budget_realism: analysis.budget_realism?.message
       ? analysis.budget_realism
-      : buildBudgetRealism(body, marketData, recommendedMin, recommendedMax, recommendedCenter),
-    assumptions: Array.isArray(analysis.assumptions) ? analysis.assumptions : [],
-    caution_notes: Array.isArray(analysis.caution_notes) ? analysis.caution_notes : [],
+      : buildBudgetRealism(
+          body,
+          marketData,
+          recommendedMin,
+          recommendedMax,
+          recommendedCenter,
+        ),
+    assumptions: Array.isArray(analysis.assumptions)
+      ? analysis.assumptions
+      : [],
+    caution_notes: Array.isArray(analysis.caution_notes)
+      ? analysis.caution_notes
+      : [],
     generated_at: new Date().toISOString(),
   };
 }
 
 function buildFallbackPricingAnalysis(
   body: PricingRequestBody,
-  marketData: PricingMarketData
+  marketData: PricingMarketData,
 ): PricingAnalysisResult {
   const marketMinBasis = marketData.avg_price_min || marketData.market_min || 0;
-  const marketMaxBasis = marketData.avg_price_max || marketData.market_max || marketMinBasis;
+  const marketMaxBasis =
+    marketData.avg_price_max || marketData.market_max || marketMinBasis;
   const marketAverage = marketMinBasis
     ? Math.round((marketMinBasis + marketMaxBasis) / 2)
     : 0;
-  const budgetAverage = body.budget_min && body.budget_max
-    ? Math.round((body.budget_min + body.budget_max) / 2)
-    : body.budget_max ?? body.budget_min ?? 0;
+  const budgetAverage =
+    body.budget_min && body.budget_max
+      ? Math.round((body.budget_min + body.budget_max) / 2)
+      : (body.budget_max ?? body.budget_min ?? 0);
   const baseCenter = marketAverage || budgetAverage || 500_000;
   const durationHours = body.duration_hours ?? 2;
   const durationMultiplier = 1 + Math.max(0, durationHours - 2) * 0.15;
   const recommendedCenter = roundToTenThousand(baseCenter * durationMultiplier);
   const recommendedMin = roundToTenThousand(
-    Math.max(recommendedCenter * 0.85, body.budget_min ?? 0)
+    Math.max(recommendedCenter * 0.85, body.budget_min ?? 0),
   );
   const recommendedMaxBaseline = recommendedCenter * 1.15;
   const recommendedMax = roundToTenThousand(
-    Math.max(recommendedMin, recommendedMaxBaseline)
+    Math.max(recommendedMin, recommendedMaxBaseline),
   );
 
   const lineItems: LineItem[] = [
@@ -424,13 +580,23 @@ function buildFallbackPricingAnalysis(
   ];
 
   return {
-    event_summary: `${body.region} ${body.event_type} / ${body.categories.join(", ")}${body.description ? ` / ${body.description}` : ""}`.slice(0, 100),
+    event_summary:
+      `${body.region} ${body.event_type} / ${body.categories.join(", ")}${body.description ? ` / ${body.description}` : ""}`.slice(
+        0,
+        100,
+      ),
     line_items: lineItems,
     recommended_min: recommendedMin,
     recommended_max: recommendedMax,
     recommended_center: recommendedCenter,
     confidence: marketData.sample_count >= 5 ? "medium" : "low",
-    budget_realism: buildBudgetRealism(body, marketData, recommendedMin, recommendedMax, recommendedCenter),
+    budget_realism: buildBudgetRealism(
+      body,
+      marketData,
+      recommendedMin,
+      recommendedMax,
+      recommendedCenter,
+    ),
     assumptions: [
       "플랫폼 내 승인 진행자 단가 데이터를 우선 반영했습니다.",
       "AI 외부 모델 응답이 불안정할 때 시장 데이터 기반 산식으로 계산했습니다.",
@@ -455,7 +621,12 @@ router.post(
           status: "approved",
           categories: { hasSome: body.categories },
           ...(body.region && body.region !== "전국"
-            ? { OR: [{ region: body.region }, { available_regions: { has: body.region } }] }
+            ? {
+                OR: [
+                  { region: body.region },
+                  { available_regions: { has: body.region } },
+                ],
+              }
             : {}),
           ...(body.career_years_min !== undefined
             ? { career_years: { gte: body.career_years_min } }
@@ -548,12 +719,32 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
       let geminiError: GeminiErrorDetail | null = null;
 
       try {
-        const rawResponse = await callGemini(prompt, systemPrompt, { responseMimeType: "application/json" });
-        analysis = parsePricingJson(rawResponse);
+        const rawResponse = await callGemini(prompt, systemPrompt, {
+          maxOutputTokens: 1800,
+          responseMimeType: "application/json",
+          responseSchema: pricingAnalysisResponseSchema,
+          temperature: 0.15,
+        });
+
+        try {
+          analysis = parsePricingJson(rawResponse);
+        } catch (parseError) {
+          console.error("[ai-pricing-analysis-parse-failed]", {
+            request_id: body.request_id,
+            message:
+              parseError instanceof Error
+                ? parseError.message
+                : String(parseError),
+            raw_response_preview: rawResponse.slice(0, 1000),
+          });
+          throw parseError;
+        }
       } catch (aiError) {
         analysisSource = "market_fallback";
         geminiError = getGeminiErrorDetail(aiError);
-        logGeminiError("[ai-pricing-analysis-fallback]", aiError, { request_id: body.request_id });
+        logGeminiError("[ai-pricing-analysis-fallback]", aiError, {
+          request_id: body.request_id,
+        });
         analysis = buildFallbackPricingAnalysis(body, marketData);
       }
 
@@ -584,14 +775,15 @@ VOIT 기준 단위 항목 예시 (해당 조건에 맞게 선택):
               analysis_source: analysisSource,
               gemini_status: geminiError.status,
               gemini_provider_status: geminiError.providerStatus,
-              gemini_error_message: geminiError.providerMessage ?? geminiError.message,
+              gemini_error_message:
+                geminiError.providerMessage ?? geminiError.message,
             }
           : { analysis_source: analysisSource },
       });
     } catch (err) {
       next(err);
     }
-  }
+  },
 );
 
 // ─── POST /api/ai/apply-recommendation ───────────────────────
@@ -621,11 +813,25 @@ router.post(
       });
 
       if (!booking) {
-        return errorResponse(res, "NOT_FOUND", "예약을 찾을 수 없습니다.", [], 404);
+        return errorResponse(
+          res,
+          "NOT_FOUND",
+          "예약을 찾을 수 없습니다.",
+          [],
+          404,
+        );
       }
 
-      if (["completed", "canceled", "disputed"].includes(booking.booking_status)) {
-        return errorResponse(res, "CONFLICT", "이미 완료/취소된 예약은 단가를 변경할 수 없습니다.", [], 409);
+      if (
+        ["completed", "canceled", "disputed"].includes(booking.booking_status)
+      ) {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "이미 완료/취소된 예약은 단가를 변경할 수 없습니다.",
+          [],
+          409,
+        );
       }
 
       const PLATFORM_FEE_RATE = 0.1;
@@ -634,7 +840,11 @@ router.post(
 
       const updated = await prisma.booking.update({
         where: { id: booking_id },
-        data: { final_price: recommended_price, platform_fee: platformFee, freelancer_amount: freelancerAmount },
+        data: {
+          final_price: recommended_price,
+          platform_fee: platformFee,
+          freelancer_amount: freelancerAmount,
+        },
       });
 
       await Promise.all([
@@ -658,7 +868,7 @@ router.post(
     } catch (err) {
       next(err);
     }
-  }
+  },
 );
 
 // ─── PATCH /api/ai/requests/:id/apply-budget ─────────────────
@@ -689,19 +899,42 @@ router.patch(
 
       const request = await prisma.eventRequest.findUnique({
         where: { id: req.params.id },
-        select: { id: true, customer_id: true, event_title: true, status: true },
+        select: {
+          id: true,
+          customer_id: true,
+          event_title: true,
+          status: true,
+        },
       });
 
       if (!request) {
-        return errorResponse(res, "NOT_FOUND", "요청서를 찾을 수 없습니다.", [], 404);
+        return errorResponse(
+          res,
+          "NOT_FOUND",
+          "요청서를 찾을 수 없습니다.",
+          [],
+          404,
+        );
       }
 
       if (userType !== "admin" && request.customer_id !== userId) {
-        return errorResponse(res, "FORBIDDEN", "본인 요청서만 수정할 수 있습니다.", [], 403);
+        return errorResponse(
+          res,
+          "FORBIDDEN",
+          "본인 요청서만 수정할 수 있습니다.",
+          [],
+          403,
+        );
       }
 
       if (["booked", "completed", "canceled"].includes(request.status)) {
-        return errorResponse(res, "CONFLICT", "현재 상태에서는 예산을 수정할 수 없습니다.", [], 409);
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "현재 상태에서는 예산을 수정할 수 없습니다.",
+          [],
+          409,
+        );
       }
 
       const updated = await prisma.eventRequest.update({
@@ -709,11 +942,15 @@ router.patch(
         data: { budget_min: body.budget_min, budget_max: body.budget_max },
       });
 
-      return successResponse(res, updated, "예산이 AI 분석 결과로 업데이트되었습니다.");
+      return successResponse(
+        res,
+        updated,
+        "예산이 AI 분석 결과로 업데이트되었습니다.",
+      );
     } catch (err) {
       next(err);
     }
-  }
+  },
 );
 
 // ─── POST /api/ai/recommendation-reason ──────────────────────
@@ -735,24 +972,40 @@ router.post(
         prisma.eventRequest.findUnique({
           where: { id: request_id },
           select: {
-            event_title: true, event_type: true, region: true,
-            budget_min: true, budget_max: true,
-            preferred_freelancer_type: true, preferred_styles: true,
+            event_title: true,
+            event_type: true,
+            region: true,
+            budget_min: true,
+            budget_max: true,
+            preferred_freelancer_type: true,
+            preferred_styles: true,
           },
         }),
         prisma.freelancerProfile.findUnique({
           where: { id: freelancer_id },
           select: {
-            display_name: true, categories: true, styles: true,
-            career_years: true, region: true, avg_rating: true,
-            review_count: true, base_price_min: true, base_price_max: true,
+            display_name: true,
+            categories: true,
+            styles: true,
+            career_years: true,
+            region: true,
+            avg_rating: true,
+            review_count: true,
+            base_price_min: true,
+            base_price_max: true,
             headline: true,
           },
         }),
       ]);
 
       if (!request || !freelancer) {
-        return errorResponse(res, "NOT_FOUND", "요청서 또는 프리랜서를 찾을 수 없습니다.", [], 404);
+        return errorResponse(
+          res,
+          "NOT_FOUND",
+          "요청서 또는 프리랜서를 찾을 수 없습니다.",
+          [],
+          404,
+        );
       }
 
       const systemPrompt = `당신은 행사 진행자 매칭 전문가입니다. 
@@ -784,20 +1037,25 @@ router.post(
 
       return successResponse(res, { reason: reason.trim() });
     } catch (err) {
-      if (axios.isAxiosError(err) && err.config?.url?.includes("generativelanguage")) {
+      if (
+        axios.isAxiosError(err) &&
+        err.config?.url?.includes("generativelanguage")
+      ) {
         const detail = getGeminiErrorDetail(err);
-        console.error("[ai-recommendation-reason-failed]", { gemini_error: detail });
+        console.error("[ai-recommendation-reason-failed]", {
+          gemini_error: detail,
+        });
         return errorResponse(
           res,
           "GEMINI_REQUEST_FAILED",
           "AI 서비스 오류가 발생했습니다. Gemini 연결 상태를 확인해 주세요.",
           [detail],
-          503
+          503,
         );
       }
       next(err);
     }
-  }
+  },
 );
 
 export default router;

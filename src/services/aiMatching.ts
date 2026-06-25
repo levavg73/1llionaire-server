@@ -4,20 +4,91 @@ import { env, requireGeminiKey } from "../config/env";
 import { createProfileImageSignedUrl } from "../utils/profileImages";
 
 const TOP_RECOMMENDATION_COUNT = 5;
-const AI_RECOMMENDATION_POOL_SIZE = 20;
+const AI_RECOMMENDATION_POOL_SIZE = 12;
 const MAX_AI_IMAGE_COUNT = 12;
 const MAX_AI_IMAGE_BYTES = 1_500_000;
 
 const EVENT_TYPE_SYNONYMS: Record<string, string[]> = {
-  "기업행사": ["기업행사", "기업", "행사", "mc", "기업행사 mc", "컨퍼런스", "시상식"],
-  "웨딩": ["웨딩", "결혼식", "사회자", "웨딩 사회자"],
+  기업행사: [
+    "기업행사",
+    "기업",
+    "행사",
+    "mc",
+    "기업행사 mc",
+    "컨퍼런스",
+    "시상식",
+  ],
+  웨딩: ["웨딩", "결혼식", "사회자", "웨딩 사회자"],
   "웨딩 사회자": ["웨딩", "결혼식", "사회자", "웨딩 사회자"],
-  "쇼호스트": ["쇼호스트", "라이브커머스", "홈쇼핑", "커머스"],
-  "라이브커머스": ["라이브커머스", "쇼호스트", "커머스", "홈쇼핑"],
-  "컨퍼런스": ["컨퍼런스", "포럼", "세미나", "기업행사", "mc"],
-  "컨퍼런스 MC": ["컨퍼런스", "컨퍼런스 mc", "포럼", "세미나", "기업행사", "mc"],
-  "아나운서": ["아나운서", "mc", "진행", "사회"],
+  쇼호스트: ["쇼호스트", "라이브커머스", "홈쇼핑", "커머스"],
+  라이브커머스: ["라이브커머스", "쇼호스트", "커머스", "홈쇼핑"],
+  컨퍼런스: ["컨퍼런스", "포럼", "세미나", "기업행사", "mc"],
+  "컨퍼런스 MC": [
+    "컨퍼런스",
+    "컨퍼런스 mc",
+    "포럼",
+    "세미나",
+    "기업행사",
+    "mc",
+  ],
+  아나운서: ["아나운서", "mc", "진행", "사회"],
 };
+
+const CORPORATE_REQUEST_KEYWORDS = [
+  "기업",
+  "기업행사",
+  "스타트업",
+  "데모데이",
+  "ir",
+  "피칭",
+  "투자",
+  "컨퍼런스",
+  "세미나",
+  "포럼",
+  "공공",
+  "기관",
+  "공식",
+  "시상식",
+  "발대식",
+  "워크숍",
+];
+
+const CORPORATE_CANDIDATE_KEYWORDS = [
+  "기업",
+  "기업행사",
+  "스타트업",
+  "데모데이",
+  "ir",
+  "피칭",
+  "투자",
+  "컨퍼런스",
+  "세미나",
+  "포럼",
+  "공공",
+  "기관",
+  "공식",
+  "비즈니스",
+  "모더레이터",
+  "컨퍼런스mc",
+  "기업행사mc",
+];
+
+const WEDDING_KEYWORDS = ["웨딩", "결혼식", "예식", "신랑", "신부", "혼주"];
+const COMMERCE_KEYWORDS = [
+  "라이브커머스",
+  "쇼호스트",
+  "홈쇼핑",
+  "커머스",
+  "상품소개",
+];
+const FESTIVAL_KEYWORDS = [
+  "축제",
+  "레크리에이션",
+  "레크레이션",
+  "돌잔치",
+  "고희연",
+  "가족행사",
+];
 
 type RequestForMatching = {
   id: string;
@@ -147,11 +218,17 @@ type AiRecommendationItem = {
   score?: number | string;
   recommendation_reason?: string;
   recommendationReason?: string;
+  core_matching_point?: string;
+  expected_effect?: string;
   reason?: string;
 };
 
 type AiRecommendationResponse =
-  | { recommendations?: AiRecommendationItem[]; items?: AiRecommendationItem[]; results?: AiRecommendationItem[] }
+  | {
+      recommendations?: AiRecommendationItem[];
+      items?: AiRecommendationItem[];
+      results?: AiRecommendationItem[];
+    }
   | AiRecommendationItem[];
 
 type GeminiErrorDetail = {
@@ -190,13 +267,16 @@ function getGeminiErrorDetail(error: unknown): GeminiErrorDetail {
   };
 }
 
-function logGeminiError(label: string, error: unknown, meta: Record<string, unknown> = {}) {
+function logGeminiError(
+  label: string,
+  error: unknown,
+  meta: Record<string, unknown> = {},
+) {
   console.error(label, {
     ...meta,
     gemini_error: getGeminiErrorDetail(error),
   });
 }
-
 
 function normalize(value?: string | null) {
   return (value ?? "")
@@ -204,6 +284,115 @@ function normalize(value?: string | null) {
     .replace(/\s+/g, "")
     .replace(/[·ㆍ|/\\_-]/g, "")
     .trim();
+}
+
+function normalizeMany(values: Array<string | null | undefined>) {
+  return values.map((value) => normalize(value)).filter(Boolean);
+}
+
+function includesAnyKeyword(text: string, keywords: string[]) {
+  const normalizedText = normalize(text);
+  return keywords.some((keyword) => {
+    const normalizedKeyword = normalize(keyword);
+    return (
+      Boolean(normalizedKeyword) && normalizedText.includes(normalizedKeyword)
+    );
+  });
+}
+
+function listIncludesAnyKeyword(values: string[], keywords: string[]) {
+  return values.some((value) => includesAnyKeyword(value, keywords));
+}
+
+function buildCandidateSearchText(candidate: MatchingCandidate) {
+  return [
+    candidate.display_name,
+    candidate.headline,
+    candidate.bio,
+    candidate.region,
+    ...candidate.available_regions,
+    ...candidate.categories,
+    ...candidate.styles,
+    ...candidate.languages,
+    ...candidate.portfolios.flatMap((portfolio) => [
+      portfolio.portfolio_type,
+      portfolio.title,
+      portfolio.description,
+      portfolio.category,
+    ]),
+    ...candidate.reviews.flatMap((review) => [
+      review.comment,
+      review.booking.event_title,
+    ]),
+  ]
+    .filter(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    )
+    .join(" ");
+}
+
+function buildRequestSearchText(request: RequestForMatching) {
+  return [
+    request.event_title,
+    request.event_type,
+    request.region,
+    request.venue,
+    request.required_language,
+    request.description,
+    ...request.preferred_freelancer_type,
+    ...request.preferred_styles,
+  ]
+    .filter(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    )
+    .join(" ");
+}
+
+function isCorporateRequest(request: RequestForMatching) {
+  return includesAnyKeyword(
+    buildRequestSearchText(request),
+    CORPORATE_REQUEST_KEYWORDS,
+  );
+}
+
+function hasCorporateEvidence(candidate: MatchingCandidate) {
+  return includesAnyKeyword(
+    buildCandidateSearchText(candidate),
+    CORPORATE_CANDIDATE_KEYWORDS,
+  );
+}
+
+function getHardMismatchReason(
+  request: RequestForMatching,
+  candidate: MatchingCandidate,
+) {
+  if (!isCorporateRequest(request)) return null;
+  if (hasCorporateEvidence(candidate)) return null;
+
+  const candidateText = buildCandidateSearchText(candidate);
+
+  if (includesAnyKeyword(candidateText, WEDDING_KEYWORDS)) {
+    return "기업/스타트업 행사 요청에 웨딩 전용 후보는 부적합";
+  }
+
+  if (includesAnyKeyword(candidateText, COMMERCE_KEYWORDS)) {
+    return "기업/스타트업 행사 요청에 라이브커머스 전용 후보는 부적합";
+  }
+
+  if (includesAnyKeyword(candidateText, FESTIVAL_KEYWORDS)) {
+    return "기업/스타트업 행사 요청에 축제/개인행사 전용 후보는 부적합";
+  }
+
+  return null;
+}
+
+function countKeywordHits(text: string, keywords: string[]) {
+  const normalizedText = normalize(text);
+  return keywords.filter((keyword) =>
+    normalizedText.includes(normalize(keyword)),
+  ).length;
 }
 
 function expandEventKeywords(eventType: string, preferredTypes: string[]) {
@@ -214,7 +403,8 @@ function expandEventKeywords(eventType: string, preferredTypes: string[]) {
     if (!keyword) return;
     expanded.add(normalize(keyword));
 
-    const synonyms = EVENT_TYPE_SYNONYMS[keyword] ?? EVENT_TYPE_SYNONYMS[keyword.trim()];
+    const synonyms =
+      EVENT_TYPE_SYNONYMS[keyword] ?? EVENT_TYPE_SYNONYMS[keyword.trim()];
     synonyms?.forEach((synonym) => expanded.add(normalize(synonym)));
   });
 
@@ -225,7 +415,9 @@ function listHasKeywordMatch(list: string[], keywords: string[]) {
   const normalizedList = list.map(normalize).filter(Boolean);
 
   return normalizedList.some((item) =>
-    keywords.some((keyword) => item.includes(keyword) || keyword.includes(item))
+    keywords.some(
+      (keyword) => item.includes(keyword) || keyword.includes(item),
+    ),
   );
 }
 
@@ -234,7 +426,9 @@ function countMatches(list: string[], targets: string[]) {
   const normalizedTargets = targets.map(normalize).filter(Boolean);
 
   return normalizedTargets.filter((target) =>
-    normalizedList.some((item) => item.includes(target) || target.includes(item))
+    normalizedList.some(
+      (item) => item.includes(target) || target.includes(item),
+    ),
   ).length;
 }
 
@@ -248,7 +442,7 @@ function isRegionMatch(requestRegion: string, candidate: MatchingCandidate) {
 
   return availableRegions.some(
     (region) =>
-      region === "전국" || region.includes(target) || target.includes(region)
+      region === "전국" || region.includes(target) || target.includes(region),
   );
 }
 
@@ -256,25 +450,37 @@ function isSameDate(left: Date, right: Date) {
   return left.toISOString().slice(0, 10) === right.toISOString().slice(0, 10);
 }
 
-function isTimeOverlap(startA: string, endA: string, startB: string, endB: string) {
+function isTimeOverlap(
+  startA: string,
+  endA: string,
+  startB: string,
+  endB: string,
+) {
   return startA < endB && startB < endA;
 }
 
-function hasScheduleConflict(request: RequestForMatching, candidate: MatchingCandidate) {
+function hasScheduleConflict(
+  request: RequestForMatching,
+  candidate: MatchingCandidate,
+) {
   return candidate.bookings.some((booking) => {
-    if (["canceled", "completed"].includes(booking.booking_status)) return false;
+    if (["canceled", "completed"].includes(booking.booking_status))
+      return false;
     if (!isSameDate(request.event_date, booking.event_date)) return false;
 
     return isTimeOverlap(
       request.start_time,
       request.end_time,
       booking.start_time,
-      booking.end_time
+      booking.end_time,
     );
   });
 }
 
-function isBudgetMatch(request: RequestForMatching, candidate: MatchingCandidate) {
+function isBudgetMatch(
+  request: RequestForMatching,
+  candidate: MatchingCandidate,
+) {
   const requestMin = request.budget_min ?? 0;
   const requestMax = request.budget_max ?? Number.MAX_SAFE_INTEGER;
   const candidateMin = candidate.base_price_min ?? 0;
@@ -283,8 +489,16 @@ function isBudgetMatch(request: RequestForMatching, candidate: MatchingCandidate
   return candidateMin <= requestMax && requestMin <= candidateMax;
 }
 
-function scoreCandidate(request: RequestForMatching, candidate: MatchingCandidate): CandidateScore | null {
+function scoreCandidate(
+  request: RequestForMatching,
+  candidate: MatchingCandidate,
+): CandidateScore | null {
   if (hasScheduleConflict(request, candidate)) {
+    return null;
+  }
+
+  const hardMismatchReason = getHardMismatchReason(request, candidate);
+  if (hardMismatchReason) {
     return null;
   }
 
@@ -293,37 +507,57 @@ function scoreCandidate(request: RequestForMatching, candidate: MatchingCandidat
 
   const eventKeywords = expandEventKeywords(
     request.event_type,
-    request.preferred_freelancer_type
+    request.preferred_freelancer_type,
   );
+  const candidateText = buildCandidateSearchText(candidate);
+  const corporateRequest = isCorporateRequest(request);
+  const corporateEvidence = hasCorporateEvidence(candidate);
 
   if (listHasKeywordMatch(candidate.categories, eventKeywords)) {
-    score += 34;
-    reasons.push("행사 분야 적합");
-  }
-
-  if (isRegionMatch(request.region, candidate)) {
-    score += 18;
-    reasons.push("지역 조건 적합");
-  }
-
-  if (request.budget_min || request.budget_max) {
-    if (isBudgetMatch(request, candidate)) {
-      score += 16;
-      reasons.push("예산 범위 적합");
-    } else {
-      score -= 12;
-    }
+    score += 35;
+    reasons.push("행사 유형 적합");
+  } else if (corporateRequest && corporateEvidence) {
+    score += 30;
+    reasons.push("기업/스타트업 행사 근거 확인");
+  } else if (countKeywordHits(candidateText, eventKeywords) > 0) {
+    score += 22;
+    reasons.push("프로필/포트폴리오의 유사 행사 근거 확인");
   }
 
   const styleMatches = countMatches(candidate.styles, request.preferred_styles);
   if (styleMatches > 0) {
-    score += Math.min(12, styleMatches * 4);
-    reasons.push("선호 스타일 일치");
+    score += Math.min(20, styleMatches * 10);
+    reasons.push("선호 진행 스타일 일치");
   }
 
+  const experienceHits = countKeywordHits(candidateText, [
+    request.event_type,
+    ...request.preferred_freelancer_type,
+    ...CORPORATE_REQUEST_KEYWORDS,
+  ]);
+  if (experienceHits > 0) {
+    score += Math.min(20, 10 + experienceHits * 2);
+    reasons.push("유사 행사 경험/포트폴리오 확인");
+  }
+
+  if (request.budget_min || request.budget_max) {
+    if (isBudgetMatch(request, candidate)) {
+      score += 10;
+      reasons.push("예산 범위 적합");
+    } else {
+      score -= 8;
+    }
+  }
+
+  if (isRegionMatch(request.region, candidate)) {
+    score += 7;
+    reasons.push("지역/출장 조건 적합");
+  }
+
+  let requirementScore = 0;
   if (request.required_language) {
     if (listHasKeywordMatch(candidate.languages, [request.required_language])) {
-      score += 8;
+      requirementScore += 2;
       reasons.push("필요 언어 가능");
     } else {
       score -= 8;
@@ -332,47 +566,50 @@ function scoreCandidate(request: RequestForMatching, candidate: MatchingCandidat
 
   if (request.script_required) {
     if (candidate.script_writing_available) {
-      score += 7;
-      reasons.push("대본 작성 가능");
+      requirementScore += 1;
+      reasons.push("대본 준비 가능");
     } else {
-      score -= 12;
+      score -= 8;
     }
   }
 
   if (request.rehearsal_required) {
     if (candidate.rehearsal_available) {
-      score += 6;
+      requirementScore += 1;
       reasons.push("리허설 가능");
     } else {
-      score -= 10;
+      score -= 7;
     }
   }
 
   if (request.travel_required) {
     if (candidate.travel_available) {
-      score += 6;
+      requirementScore += 1;
       reasons.push("출장 가능");
     } else {
-      score -= 10;
+      score -= 7;
     }
   }
+  score += Math.min(5, requirementScore);
 
-  if (candidate.avg_rating) {
-    score += Math.min(8, candidate.avg_rating * 1.6);
-    reasons.push(`평점 ${candidate.avg_rating.toFixed(1)}점`);
-  }
-
-  if (candidate.review_count > 0) {
-    score += Math.min(5, candidate.review_count / 5);
+  const trustScore = Math.min(
+    3,
+    (candidate.avg_rating ? candidate.avg_rating / 2 : 0) +
+      (candidate.review_count > 0
+        ? Math.min(0.6, candidate.review_count / 20)
+        : 0) +
+      (candidate.voice_score ? Math.min(0.6, candidate.voice_score / 100) : 0),
+  );
+  if (trustScore > 0) {
+    score += trustScore;
+    if (candidate.avg_rating)
+      reasons.push(`평점 ${candidate.avg_rating.toFixed(1)}점`);
   }
 
   if (candidate.career_years) {
-    score += Math.min(7, candidate.career_years * 0.6);
-    if (candidate.career_years >= 5) reasons.push(`${candidate.career_years}년 경력`);
-  }
-
-  if (candidate.voice_score) {
-    score += Math.min(4, candidate.voice_score);
+    score += Math.min(5, candidate.career_years * 0.4);
+    if (candidate.career_years >= 5)
+      reasons.push(`${candidate.career_years}년 경력`);
   }
 
   return {
@@ -381,7 +618,6 @@ function scoreCandidate(request: RequestForMatching, candidate: MatchingCandidat
     reasons,
   };
 }
-
 
 function truncate(value: string | null | undefined, maxLength: number) {
   if (!value) return null;
@@ -400,7 +636,8 @@ function getImageMimeFromUrl(url: string) {
   const cleanUrl = url.split("?")[0].toLowerCase();
   if (cleanUrl.endsWith(".png")) return "image/png";
   if (cleanUrl.endsWith(".webp")) return "image/webp";
-  if (cleanUrl.endsWith(".jpg") || cleanUrl.endsWith(".jpeg")) return "image/jpeg";
+  if (cleanUrl.endsWith(".jpg") || cleanUrl.endsWith(".jpeg"))
+    return "image/jpeg";
   return null;
 }
 
@@ -414,19 +651,23 @@ function normalizeImageMime(contentType: string | undefined, url: string) {
   return getImageMimeFromUrl(url);
 }
 
-async function fetchImageAsGeminiPart(url: string): Promise<GeminiContentPart | null> {
+async function fetchImageAsGeminiPart(
+  url: string,
+): Promise<GeminiContentPart | null> {
   try {
     const response = await axios.get<ArrayBuffer>(url, {
       responseType: "arraybuffer",
       timeout: 6_000,
       maxContentLength: MAX_AI_IMAGE_BYTES,
       headers: {
-        Accept: "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
+        Accept:
+          "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1",
       },
     });
 
     const buffer = Buffer.from(response.data);
-    if (buffer.byteLength === 0 || buffer.byteLength > MAX_AI_IMAGE_BYTES) return null;
+    if (buffer.byteLength === 0 || buffer.byteLength > MAX_AI_IMAGE_BYTES)
+      return null;
 
     const contentTypeHeader = response.headers["content-type"];
     const contentType = Array.isArray(contentTypeHeader)
@@ -444,7 +685,11 @@ async function fetchImageAsGeminiPart(url: string): Promise<GeminiContentPart | 
   } catch (err) {
     console.warn("[ai-recommendation-image-fetch-failed]", {
       url,
-      error: axios.isAxiosError(err) ? getGeminiErrorDetail(err) : err instanceof Error ? err.message : String(err),
+      error: axios.isAxiosError(err)
+        ? getGeminiErrorDetail(err)
+        : err instanceof Error
+          ? err.message
+          : String(err),
     });
     return null;
   }
@@ -453,7 +698,7 @@ async function fetchImageAsGeminiPart(url: string): Promise<GeminiContentPart | 
 async function callGeminiWithParts(
   parts: GeminiContentPart[],
   systemPrompt: string,
-  maxOutputTokens = 4096
+  maxOutputTokens = 4096,
 ) {
   const apiKey = requireGeminiKey();
   const modelPath = env.GEMINI_MODEL.startsWith("models/")
@@ -484,7 +729,7 @@ async function callGeminiWithParts(
         "Content-Type": "application/json",
       },
       timeout: 30_000,
-    }
+    },
   );
 
   if (response.data.error) {
@@ -493,7 +738,7 @@ async function callGeminiWithParts(
 
   if (response.data.promptFeedback?.blockReason) {
     throw new Error(
-      `Gemini API blocked the prompt: ${response.data.promptFeedback.blockReason}`
+      `Gemini API blocked the prompt: ${response.data.promptFeedback.blockReason}`,
     );
   }
 
@@ -514,9 +759,8 @@ async function callGeminiWithParts(
 
 function extractJsonString(raw: string) {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) return fenced[1].trim();
+  const trimmed = (fenced?.[1] ?? raw).trim();
 
-  const trimmed = raw.trim();
   const objectStart = trimmed.indexOf("{");
   const arrayStart = trimmed.indexOf("[");
   const starts = [objectStart, arrayStart].filter((index) => index >= 0);
@@ -527,18 +771,46 @@ function extractJsonString(raw: string) {
   const lastArrayEnd = trimmed.lastIndexOf("]");
   const end = Math.max(lastObjectEnd, lastArrayEnd);
 
-  return end >= start ? trimmed.slice(start, end + 1) : trimmed.slice(start);
+  return end >= start
+    ? trimmed.slice(start, end + 1).trim()
+    : trimmed.slice(start).trim();
+}
+
+function removeTrailingJsonCommas(json: string) {
+  return json.replace(/,\s*([}\]])/g, "$1");
+}
+
+function quoteUnquotedJsonKeys(json: string) {
+  return json.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":');
 }
 
 function parseAiRecommendationJson(raw: string): AiRecommendationItem[] {
   const jsonStr = extractJsonString(raw);
-  const parsed = JSON.parse(jsonStr) as AiRecommendationResponse;
+  const candidates = [
+    jsonStr,
+    removeTrailingJsonCommas(jsonStr),
+    quoteUnquotedJsonKeys(removeTrailingJsonCommas(jsonStr)),
+  ];
 
-  if (Array.isArray(parsed)) return parsed;
-  return parsed.recommendations ?? parsed.items ?? parsed.results ?? [];
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as AiRecommendationResponse;
+      if (Array.isArray(parsed)) return parsed;
+      return parsed.recommendations ?? parsed.items ?? parsed.results ?? [];
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to parse AI recommendation JSON");
 }
 
-export function isGenericRecommendationReason(reason: string | null | undefined) {
+export function isGenericRecommendationReason(
+  reason: string | null | undefined,
+) {
   const normalized = reason?.replace(/\s+/g, " ").trim() ?? "";
   if (!normalized) return true;
 
@@ -552,7 +824,9 @@ export function isGenericRecommendationReason(reason: string | null | undefined)
     "예산 범위 적합",
   ];
 
-  const genericHitCount = genericPatterns.filter((pattern) => normalized.includes(pattern)).length;
+  const genericHitCount = genericPatterns.filter((pattern) =>
+    normalized.includes(pattern),
+  ).length;
   return normalized.length < 45 || genericHitCount >= 2;
 }
 
@@ -571,18 +845,21 @@ function normalizeCandidateKey(value: string | null | undefined) {
 function getAiRecommendationCandidateId(
   recommendation: AiRecommendationItem,
   scoredById: Map<string, CandidateScore>,
-  scoredByName: Map<string, CandidateScore>
+  scoredByName: Map<string, CandidateScore>,
 ) {
-  const id = recommendation.freelancer_id
-    ?? recommendation.freelancerId
-    ?? recommendation.candidate_id
-    ?? recommendation.candidateId
-    ?? recommendation.id;
+  const id =
+    recommendation.freelancer_id ??
+    recommendation.freelancerId ??
+    recommendation.candidate_id ??
+    recommendation.candidateId ??
+    recommendation.id;
 
   if (id && scoredById.has(id)) return id;
 
   const displayName = recommendation.display_name ?? recommendation.name;
-  const scoredByDisplayName = scoredByName.get(normalizeCandidateKey(displayName));
+  const scoredByDisplayName = scoredByName.get(
+    normalizeCandidateKey(displayName),
+  );
   if (scoredByDisplayName) return scoredByDisplayName.candidate.id;
 
   return null;
@@ -679,11 +956,14 @@ type CandidateImageSource = {
   url: string;
 };
 
-async function collectCandidateImageSources(scored: CandidateScore): Promise<CandidateImageSource[]> {
+async function collectCandidateImageSources(
+  scored: CandidateScore,
+): Promise<CandidateImageSource[]> {
   const candidate = scored.candidate;
   const candidateLabel = `${candidate.display_name ?? "이름 미등록"}(${candidate.id})`;
   const profileImageUrl =
-    candidate.profile_image_url ?? await createProfileImageSignedUrl(candidate.profile_image_path);
+    candidate.profile_image_url ??
+    (await createProfileImageSignedUrl(candidate.profile_image_path));
 
   return [
     ...(profileImageUrl
@@ -702,7 +982,9 @@ async function collectCandidateImageSources(scored: CandidateScore): Promise<Can
 
 async function collectCandidateImageParts(ranked: CandidateScore[]) {
   const candidateImageSources = (
-    await Promise.all(ranked.map((scored) => collectCandidateImageSources(scored)))
+    await Promise.all(
+      ranked.map((scored) => collectCandidateImageSources(scored)),
+    )
   )
     .flat()
     .slice(0, MAX_AI_IMAGE_COUNT);
@@ -711,7 +993,7 @@ async function collectCandidateImageParts(ranked: CandidateScore[]) {
     candidateImageSources.map(async (source) => ({
       source,
       imagePart: await fetchImageAsGeminiPart(source.url),
-    }))
+    })),
   );
 
   return fetchedImages.flatMap(({ source, imagePart }) => {
@@ -728,30 +1010,60 @@ async function collectCandidateImageParts(ranked: CandidateScore[]) {
 
 function buildAiRecommendationSystemPrompt() {
   return [
-    "당신은 행사 진행자/MC 매칭 전문가입니다.",
-    "목표는 단순 조건 점수 계산이 아니라, 고객 요청서를 읽고 후보별 등록 자료를 비교해 실제로 이 요청서에 부합하는 진행자를 선별하는 것입니다.",
-    "반드시 고객 요청서의 행사 목적/분야/지역/시간/예산/선호 스타일/필수 조건과 후보의 자기소개, 헤드라인, 경력, 단가, 후기, 포트폴리오, 이미지 단서를 서로 연결해 판단하세요.",
-    "추천하지 않아도 되는 후보는 제외하세요. 근거가 부족하거나 요청서와 약한 후보를 억지로 5명까지 채우지 마세요.",
+    "당신은 행사 및 방송 섭외를 전문으로 하는 15년 차 베테랑 캐스팅 디렉터입니다.",
+    "목표는 고객 요청서에서 행사 성격, 타깃 청중, 요구 진행 톤을 읽고 실제 실패 가능성이 낮은 진행자를 고르는 것입니다.",
+    "추천 우선순위는 행사 성격 적합성, 유사 행사 경험, 진행 스타일, 필수 조건, 예산 현실성, 후기/포트폴리오 근거 순입니다.",
+    "기업행사/스타트업/컨퍼런스/세미나/포럼/데모데이/IR 요청에는 웨딩 전용, 돌잔치 전용, 라이브커머스 전용 후보를 추천하지 마세요. 단, 해당 후보 자료에 기업행사/컨퍼런스/공식행사/IR/데모데이 경험이 명확하면 추천 가능합니다.",
+    "후보자의 프로필, 후기, 포트폴리오에 없는 경력·실적·장점을 지어내지 마세요.",
+    "필수 언어, 지역, 출장, 대본 작성, 리허설 조건을 충족하지 못하는 후보는 추천하지 마세요.",
+    "후보가 부족하면 억지로 5명을 채우지 말고 추천 가능한 후보만 반환하세요.",
     "추천 사유는 고객에게 바로 노출됩니다. 한국어 존댓말 2~3문장으로 자연스럽고 구체적으로 작성하세요.",
-    "각 추천 사유에는 실제 후보 자료 근거를 최소 2개 이상 포함하세요. 예: 자기소개 문구, 유사 행사 포트폴리오, 후기의 평가 항목/코멘트, 경력 연수, 단가와 고객 예산의 관계, 이미지에서 보이는 전문적 분위기.",
-    "후기/소개/포트폴리오/이미지에서 확인되지 않는 실적, 수상, 행사 경험은 절대 지어내지 마세요.",
-    "이미지는 명확히 확인되는 분위기/전문성 단서만 반영하고, 불확실하면 이미지 자체를 언급하지 마세요.",
+    "각 추천 사유는 요청서 조건 1개 이상, 후보자의 실제 근거 2개 이상, 기대 효과 1개를 연결해야 합니다.",
     "'조건 기반 매칭 결과', '요청 조건과 잘 맞습니다'처럼 일반적인 문장만 쓰면 안 됩니다.",
     "반드시 JSON만 반환하세요. 마크다운, 설명문, 코드블록은 금지입니다.",
   ].join("\n");
 }
 
-function buildAiRecommendationUserPrompt(request: RequestForMatching, ranked: CandidateScore[]) {
+function buildAiRecommendationUserPrompt(
+  request: RequestForMatching,
+  ranked: CandidateScore[],
+) {
   return JSON.stringify(
     {
-      task: "아래 고객 요청서와 후보 자료를 비교해, 이 요청서에 실제로 부합하는 진행자만 최대 5명 추천 순서대로 고르고 추천 사유를 작성하세요. 후보 자료 근거가 부족하면 추천하지 마세요.",
+      role: "15년 차 행사/방송 섭외 캐스팅 디렉터",
+      task: "고객 요청서와 후보 자료를 비교해 이 행사에 실제로 부합하는 진행자만 최대 5명 추천 순서대로 고르고, 추천 사유를 작성하세요. 후보 자료 근거가 부족하면 추천하지 마세요.",
+      hard_rules: [
+        "행사 유형이 명백히 맞지 않는 후보는 제외",
+        "기업/스타트업/컨퍼런스/세미나/IR/데모데이 행사에는 웨딩 전용 후보 추천 금지",
+        "프로필/포트폴리오/후기에 없는 경력 생성 금지",
+        "추천 사유에는 요청서 조건과 후보 실제 근거를 연결",
+        "후보가 부족하면 억지로 채우지 않기",
+      ],
       output_schema: {
+        request_analysis: {
+          event_character: "요청 행사의 성격 요약",
+          target_audience: "주요 참석자/청중 추정",
+          required_style: "요구되는 진행 스타일",
+          must_have_conditions: ["필수 조건"],
+        },
         recommendations: [
           {
             freelancer_id: "후보 ID",
+            rank: 1,
             match_score: "0부터 100 사이 숫자",
-            evidence: ["요청서 조건과 연결되는 실제 후보 근거 1", "실제 후보 근거 2"],
-            recommendation_reason: "고객에게 보여줄 2~3문장 추천 사유. 반드시 자기소개/후기/포트폴리오/경력/이미지/단가 중 실제 근거를 요청서 조건과 연결해서 작성",
+            name: "추천 인물 이름",
+            core_matching_point:
+              "왜 이 사람인가. 요청서 조건과 후보자의 강점을 구체적으로 연결",
+            expected_effect: "이 진행자를 섭외했을 때 기대되는 행사 효과",
+            matched_evidence: ["실제 후보 근거 1", "실제 후보 근거 2"],
+            caution: "주의점이 있으면 작성, 없으면 null",
+            recommendation_reason: "고객 화면에 보여줄 2~3문장 추천 사유",
+          },
+        ],
+        rejected_candidates: [
+          {
+            freelancer_id: "후보 ID",
+            reason: "추천하지 않은 이유",
           },
         ],
       },
@@ -759,20 +1071,22 @@ function buildAiRecommendationUserPrompt(request: RequestForMatching, ranked: Ca
       candidates: ranked.map(buildCandidateContextForAi),
     },
     null,
-    2
+    2,
   );
 }
 
 async function generateAiRecommendationItems(
   request: RequestForMatching,
   ranked: CandidateScore[],
-  includeImages: boolean
+  includeImages: boolean,
 ) {
   const prompt = buildAiRecommendationUserPrompt(request, ranked);
-  const imageParts = includeImages ? await collectCandidateImageParts(ranked) : [];
+  const imageParts = includeImages
+    ? await collectCandidateImageParts(ranked)
+    : [];
   const raw = await callGeminiWithParts(
     [{ text: prompt }, ...imageParts],
-    buildAiRecommendationSystemPrompt()
+    buildAiRecommendationSystemPrompt(),
   );
 
   return parseAiRecommendationJson(raw);
@@ -780,7 +1094,7 @@ async function generateAiRecommendationItems(
 
 async function buildAiRecommendationDrafts(
   request: RequestForMatching,
-  ranked: CandidateScore[]
+  ranked: CandidateScore[],
 ): Promise<RecommendationDraft[]> {
   if (ranked.length === 0) return [];
 
@@ -789,7 +1103,11 @@ async function buildAiRecommendationDrafts(
 
   for (const includeImages of [true, false]) {
     try {
-      aiRecommendations = await generateAiRecommendationItems(request, ranked, includeImages);
+      aiRecommendations = await generateAiRecommendationItems(
+        request,
+        ranked,
+        includeImages,
+      );
       if (aiRecommendations.length > 0) break;
       throw new Error("Gemini API returned no recommendation items");
     } catch (err) {
@@ -799,7 +1117,7 @@ async function buildAiRecommendationDrafts(
           ? "[ai-recommendation-with-images-failed] retrying text-only"
           : "[ai-recommendation-text-only-failed] using local rich reasons",
         err,
-        { request_id: request.id, include_images: includeImages }
+        { request_id: request.id, include_images: includeImages },
       );
     }
   }
@@ -809,22 +1127,37 @@ async function buildAiRecommendationDrafts(
     ranked.flatMap((item) => {
       const displayName = normalizeCandidateKey(item.candidate.display_name);
       return displayName ? [[displayName, item] as const] : [];
-    })
+    }),
   );
   const selectedIds = new Set<string>();
   const drafts: RecommendationDraft[] = [];
 
   for (const recommendation of aiRecommendations) {
-    const candidateId = getAiRecommendationCandidateId(recommendation, scoredById, scoredByName);
+    const candidateId = getAiRecommendationCandidateId(
+      recommendation,
+      scoredById,
+      scoredByName,
+    );
     if (!candidateId || selectedIds.has(candidateId)) continue;
 
     const scored = scoredById.get(candidateId);
     if (!scored) continue;
 
+    const aiNarrativeReason = [
+      recommendation.core_matching_point,
+      recommendation.expected_effect,
+    ]
+      .filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      )
+      .join(" ");
+
     const recommendationReason = sanitizeAiReason(
-      recommendation.recommendation_reason
-        ?? recommendation.recommendationReason
-        ?? recommendation.reason
+      recommendation.recommendation_reason ??
+        recommendation.recommendationReason ??
+        recommendation.reason ??
+        aiNarrativeReason,
     );
 
     // AI가 실제 근거가 있는 추천 사유를 작성하지 못한 후보는 저장하지 않습니다.
@@ -835,7 +1168,9 @@ async function buildAiRecommendationDrafts(
       scored,
       recommendationReason,
       aiScore: normalizeAiScore(
-        recommendation.match_score ?? recommendation.matchScore ?? recommendation.score
+        recommendation.match_score ??
+          recommendation.matchScore ??
+          recommendation.score,
       ),
     });
     selectedIds.add(candidateId);
@@ -865,13 +1200,29 @@ async function buildAiRecommendationDrafts(
 }
 
 function joinNaturalKorean(items: string[]) {
-  const uniqueItems = [...new Set(items.map((item) => item.trim()).filter(Boolean))];
-  if (uniqueItems.length <= 1) return uniqueItems[0] ?? "";
-  return `${uniqueItems.slice(0, -1).join(", ")}와 ${uniqueItems[uniqueItems.length - 1]}`;
+  const uniqueItems = [
+    ...new Set(items.map((item) => item.trim()).filter(Boolean)),
+  ];
+  return uniqueItems.join("·");
+}
+
+function formatEventTypeForSentence(eventType: string) {
+  const trimmed = eventType.trim();
+  if (!trimmed) return "행사";
+  return trimmed.includes("행사") ? trimmed : `${trimmed} 행사`;
+}
+
+function buildEventLabel(request: RequestForMatching) {
+  return [request.region, formatEventTypeForSentence(request.event_type)]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
 }
 
 function pickReviewEvidence(candidate: MatchingCandidate) {
-  const reviewWithComment = candidate.reviews.find((review) => review.comment?.trim());
+  const reviewWithComment = candidate.reviews.find((review) =>
+    review.comment?.trim(),
+  );
   if (!reviewWithComment) return null;
 
   const strengths = [
@@ -882,56 +1233,90 @@ function pickReviewEvidence(candidate: MatchingCandidate) {
     reviewWithComment.response_score >= 4 ? "현장 대응" : null,
   ].filter((item): item is string => Boolean(item));
 
-  const strengthText = strengths.length > 0 ? `${joinNaturalKorean(strengths.slice(0, 3))} 평가가 좋고` : "후기 평가가 좋고";
-  return `후기에서도 ${strengthText}, ${truncate(reviewWithComment.comment, 90)}라는 반응을 확인할 수 있습니다.`;
+  const strengthText =
+    strengths.length > 0
+      ? `${joinNaturalKorean(strengths.slice(0, 3))} 항목이 높게 평가되었고`
+      : "후기 평가가 좋고";
+  return `후기에서는 ${strengthText}, “${truncate(reviewWithComment.comment, 90)}”라는 반응을 확인할 수 있습니다.`;
 }
 
-function pickPortfolioEvidence(candidate: MatchingCandidate, request: RequestForMatching) {
+function pickPortfolioEvidence(
+  candidate: MatchingCandidate,
+  request: RequestForMatching,
+) {
   const eventKeyword = normalize(request.event_type);
-  const matchedPortfolio = candidate.portfolios.find((portfolio) => {
-    const text = normalize([
-      portfolio.title,
-      portfolio.description,
-      portfolio.category,
-      portfolio.portfolio_type,
-    ].filter(Boolean).join(" "));
-    return eventKeyword && text.includes(eventKeyword);
-  }) ?? candidate.portfolios.find((portfolio) => portfolio.is_representative) ?? candidate.portfolios[0];
+  const matchedPortfolio =
+    candidate.portfolios.find((portfolio) => {
+      const text = normalize(
+        [
+          portfolio.title,
+          portfolio.description,
+          portfolio.category,
+          portfolio.portfolio_type,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
+      return eventKeyword && text.includes(eventKeyword);
+    }) ??
+    candidate.portfolios.find((portfolio) => portfolio.is_representative) ??
+    candidate.portfolios[0];
 
   if (!matchedPortfolio) return null;
 
   const title = truncate(matchedPortfolio.title, 50);
   const description = truncate(matchedPortfolio.description, 90);
+  const eventLabel = formatEventTypeForSentence(request.event_type);
   if (description) {
-    return `포트폴리오에서는 「${title}」 사례와 ${description} 내용을 확인할 수 있어 요청하신 ${request.event_type} 진행 이미지와 비교하기 좋습니다.`;
+    return `포트폴리오에서는 「${title}」 사례와 “${description}” 내용을 확인할 수 있어 ${eventLabel} 진행 이미지와 비교하기 좋습니다.`;
   }
 
-  return `포트폴리오에 「${title}」 자료가 등록되어 있어 요청하신 ${request.event_type} 행사와의 적합성을 확인할 수 있습니다.`;
+  return `포트폴리오에 「${title}」 자료가 등록되어 있어 ${eventLabel}와의 적합성을 확인할 수 있습니다.`;
 }
 
-function buildRecommendationReason(scored: CandidateScore, request: RequestForMatching) {
+function buildRecommendationReason(
+  scored: CandidateScore,
+  request: RequestForMatching,
+) {
   const candidate = scored.candidate;
   const displayName = candidate.display_name || "해당 진행자";
   const intro = truncate(candidate.headline || candidate.bio, 120);
-  const requestTraits = [
-    request.event_type ? `${request.event_type} 행사` : null,
-    request.region ? `${request.region} 지역` : null,
-    request.required_language ? `${request.required_language} 진행` : null,
-    request.preferred_styles.length > 0 ? `${joinNaturalKorean(request.preferred_styles.slice(0, 2))} 스타일` : null,
-    request.script_required && candidate.script_writing_available ? "대본 준비" : null,
-    request.rehearsal_required && candidate.rehearsal_available ? "리허설" : null,
-    request.travel_required && candidate.travel_available ? "출장" : null,
-  ].filter((item): item is string => Boolean(item));
+  const eventLabel = buildEventLabel(request) || "이번 행사";
 
   const candidateTraits = [
-    candidate.categories.length > 0 ? `${joinNaturalKorean(candidate.categories.slice(0, 2))} 분야` : null,
-    candidate.styles.length > 0 ? `${joinNaturalKorean(candidate.styles.slice(0, 2))} 분위기` : null,
+    candidate.categories.length > 0
+      ? `${joinNaturalKorean(candidate.categories.slice(0, 2))} 분야 경험`
+      : null,
+    candidate.styles.length > 0
+      ? `${joinNaturalKorean(candidate.styles.slice(0, 2))} 진행 스타일`
+      : null,
     candidate.career_years ? `${candidate.career_years}년 경력` : null,
     candidate.avg_rating ? `평점 ${candidate.avg_rating.toFixed(1)}점` : null,
   ].filter((item): item is string => Boolean(item));
 
-  const firstSentence = `${displayName}님은 ${candidateTraits.length > 0 ? joinNaturalKorean(candidateTraits.slice(0, 3)) : "등록된 프로필 정보"}을 바탕으로 ${requestTraits.length > 0 ? joinNaturalKorean(requestTraits.slice(0, 3)) : "이번 요청 조건"}에 잘 맞는 후보입니다.`;
-  const introSentence = intro ? `프로필에서도 “${intro}” 내용을 확인할 수 있어 고객이 원하는 진행 톤을 사전에 판단하기 좋습니다.` : null;
+  const requestConditions = [
+    request.required_language ? `${request.required_language} 진행` : null,
+    request.script_required && candidate.script_writing_available
+      ? "대본 준비"
+      : null,
+    request.rehearsal_required && candidate.rehearsal_available
+      ? "리허설"
+      : null,
+    request.travel_required && candidate.travel_available ? "출장" : null,
+  ].filter((item): item is string => Boolean(item));
+
+  const evidenceText =
+    candidateTraits.length > 0
+      ? `${joinNaturalKorean(candidateTraits.slice(0, 3))}을 갖춘 후보로`
+      : "등록된 프로필 정보를 기준으로";
+  const conditionText =
+    requestConditions.length > 0
+      ? ` 특히 ${joinNaturalKorean(requestConditions)} 조건도 함께 확인됩니다.`
+      : "";
+  const firstSentence = `${displayName}님은 ${evidenceText} ${eventLabel}에 적합합니다.${conditionText}`;
+  const introSentence = intro
+    ? `프로필에서도 “${intro}” 내용을 확인할 수 있어 고객이 원하는 진행 톤을 사전에 판단하기 좋습니다.`
+    : null;
   const portfolioSentence = pickPortfolioEvidence(candidate, request);
   const reviewSentence = pickReviewEvidence(candidate);
 
@@ -957,7 +1342,9 @@ export async function generateAiRecommendationsForRequest(params: {
   const candidates = await prisma.freelancerProfile.findMany({
     where: {
       status: "approved",
-      ...(excludedFreelancerIds.length > 0 && { id: { notIn: excludedFreelancerIds } }),
+      ...(excludedFreelancerIds.length > 0 && {
+        id: { notIn: excludedFreelancerIds },
+      }),
     },
     select: {
       id: true,
@@ -1044,7 +1431,10 @@ export async function generateAiRecommendationsForRequest(params: {
     };
   }
 
-  const recommendationDrafts = await buildAiRecommendationDrafts(request, ranked);
+  const recommendationDrafts = await buildAiRecommendationDrafts(
+    request,
+    ranked,
+  );
 
   if (recommendationDrafts.length === 0) {
     console.error("[ai-recommendation-empty-after-local-fallback]", {
