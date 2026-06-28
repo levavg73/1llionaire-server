@@ -40,7 +40,6 @@ app.use(
   })
 );
 
-
 app.use(
   cors({
     origin: (
@@ -119,7 +118,33 @@ if (!isProduction) {
   app.use(morgan(":remote-addr :method :url :status - :response-time ms"));
 }
 
-// ─── 헬스체크 ───────────────────────────────────────────────
+// ─── 기본 안내 & 헬스체크 ─────────────────────────────────────
+
+const apiInfo = {
+  service: "VOIT API",
+  status: "ok",
+  env: env.NODE_ENV,
+  health: "/health",
+  apiBase: "/api",
+  publicRoutes: ["/api/public"],
+  authRoutes: ["/api/auth/login", "/api/auth/signup", "/api/auth/me", "/api/auth/refresh"],
+};
+
+app.get("/", (_req: express.Request, res: express.Response) => {
+  res.json({
+    success: true,
+    data: apiInfo,
+    message: "VOIT API 서버가 정상 동작 중입니다. API는 /api 하위 경로를 사용하세요.",
+  });
+});
+
+app.get("/api", (_req: express.Request, res: express.Response) => {
+  res.json({
+    success: true,
+    data: apiInfo,
+    message: "API 기본 경로입니다. 실제 요청은 /api/auth, /api/public 등 하위 경로를 사용하세요.",
+  });
+});
 
 app.get("/health", (_req: express.Request, res: express.Response) => {
   res.json({
