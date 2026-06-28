@@ -67,23 +67,38 @@ const globalLimiter = rateLimit({
   message: {
     success: false,
     error: {
-      code: "SERVER_ERROR",
+      code: "TOO_MANY_REQUESTS",
       message: "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
       details: [],
     },
   },
 });
 
-const authLimiter = rateLimit({
+const credentialAuthLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
     success: false,
     error: {
-      code: "SERVER_ERROR",
-      message: "로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+      code: "TOO_MANY_REQUESTS",
+      message: "로그인 또는 회원가입 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.",
+      details: [],
+    },
+  },
+});
+
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: {
+      code: "TOO_MANY_REQUESTS",
+      message: "인증 갱신 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
       details: [],
     },
   },
@@ -91,14 +106,14 @@ const authLimiter = rateLimit({
 
 // AI 분석은 별도 rate limit (모델 비용 보호)
 const aiLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1시간
+  windowMs: 60 * 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
     success: false,
     error: {
-      code: "SERVER_ERROR",
+      code: "TOO_MANY_REQUESTS",
       message: "AI 분석 요청 횟수를 초과했습니다. 1시간 후 다시 시도해 주세요.",
       details: [],
     },
@@ -149,7 +164,11 @@ app.get("/api", (_req: express.Request, res: express.Response) => {
 app.get("/health", (_req: express.Request, res: express.Response) => {
   res.json({
     success: true,
-    data: { status: "ok", env: env.NODE_ENV, timestamp: new Date().toISOString() },
+    data: {
+      status: "ok",
+      env: env.NODE_ENV,
+      timestamp: new Date().toISOString(),
+    },
     message: "서버가 정상 동작 중입니다.",
   });
 });
@@ -157,13 +176,14 @@ app.get("/health", (_req: express.Request, res: express.Response) => {
 // ─── 라우트 ────────────────────────────────────────────────
 
 // 인증
-app.use("/api/auth/login", authLimiter);
-app.use("/api/auth/signup", authLimiter);
-app.use("/api/auth/refresh", authLimiter);
-app.use("/api/auth", authRoutes);
+app.use("/api/auth/login", credentialAuthLimiter);
+app.use("/api/auth/signup", credentialAuthLimiter);
+app.use("/api/auth/refresh", refreshLimiter);
 
-// 소셜 로그인 (rate limit 동일 적용)
-app.use("/api/auth/oauth", authLimiter, oauthRoutes);
+// 소셜 로그인
+app.use("/api/auth/oauth", credentialAuthLimiter, oauthRoutes);
+
+app.use("/api/auth", authRoutes);
 
 // 사용자
 app.use("/api/users", usersRoutes);
@@ -180,7 +200,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/contracts", contractRoutes);
 
-// AI 분석 (전용 rate limit)
+// AI 분석
 app.use("/api/ai", aiLimiter, aiRoutes);
 
 // 공개 & 관리자
