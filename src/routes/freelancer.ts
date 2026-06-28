@@ -27,14 +27,39 @@ import {
   getSupabaseAdminClient,
   isOwnProfileImagePath,
 } from "../utils/profileImages";
+import {
+  SIGNATURE_VOICE_BUCKET,
+  SIGNATURE_VOICE_MAX_SIZE,
+  attachSignedSignatureVoiceUrl,
+  createSignatureVoiceSignedUrl,
+  getSupabaseSignatureVoiceAdminClient,
+  isOwnSignatureVoicePath,
+} from "../utils/signatureVoice";
 
 const router = Router();
 
 const allowedProfileImageMimeTypes = new Set(["image/jpeg", "image/png"]);
+const allowedSignatureVoiceMimeTypes = new Set([
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/wav",
+  "audio/wave",
+  "audio/x-wav",
+  "audio/mp4",
+  "audio/x-m4a",
+  "audio/webm",
+]);
 
 function getProfileImageExtension(file: Express.Multer.File) {
   if (file.mimetype === "image/png") return ".png";
   return ".jpg";
+}
+
+function getSignatureVoiceExtension(file: Express.Multer.File) {
+  if (["audio/wav", "audio/wave", "audio/x-wav"].includes(file.mimetype)) return ".wav";
+  if (["audio/mp4", "audio/x-m4a"].includes(file.mimetype)) return ".m4a";
+  if (file.mimetype === "audio/webm") return ".webm";
+  return ".mp3";
 }
 
 function hasValidProfileImageSignature(file: Express.Multer.File) {
@@ -52,8 +77,41 @@ function hasValidProfileImageSignature(file: Express.Multer.File) {
   return false;
 }
 
+function hasValidSignatureVoiceSignature(file: Express.Multer.File) {
+  const { buffer } = file;
+
+  if (["audio/mpeg", "audio/mp3"].includes(file.mimetype)) {
+    const hasId3Tag = buffer.length >= 3 && buffer.subarray(0, 3).toString("ascii") === "ID3";
+    const hasMp3FrameSync = buffer.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0;
+    return hasId3Tag || hasMp3FrameSync;
+  }
+
+  if (["audio/wav", "audio/wave", "audio/x-wav"].includes(file.mimetype)) {
+    return (
+      buffer.length >= 12 &&
+      buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+      buffer.subarray(8, 12).toString("ascii") === "WAVE"
+    );
+  }
+
+  if (["audio/mp4", "audio/x-m4a"].includes(file.mimetype)) {
+    return buffer.length >= 12 && buffer.subarray(4, 8).toString("ascii") === "ftyp";
+  }
+
+  if (file.mimetype === "audio/webm") {
+    const webmSignature = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+    return buffer.length >= webmSignature.length && buffer.subarray(0, webmSignature.length).equals(webmSignature);
+  }
+
+  return false;
+}
+
 function buildProfileImageStoragePath(userId: string, file: Express.Multer.File) {
   return `freelancers/${userId}/${Date.now()}-${crypto.randomUUID()}${getProfileImageExtension(file)}`;
+}
+
+function buildSignatureVoiceStoragePath(userId: string, file: Express.Multer.File) {
+  return `freelancers/${userId}/signature-voice/${Date.now()}-${crypto.randomUUID()}${getSignatureVoiceExtension(file)}`;
 }
 
 async function deleteStoredProfileImage(path?: string | null) {
@@ -62,6 +120,19 @@ async function deleteStoredProfileImage(path?: string | null) {
   const { error } = await getSupabaseAdminClient()
     .storage
     .from(PROFILE_IMAGE_BUCKET)
+    .remove([path]);
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function deleteStoredSignatureVoice(path?: string | null) {
+  if (!path) return;
+
+  const { error } = await getSupabaseSignatureVoiceAdminClient()
+    .storage
+    .from(SIGNATURE_VOICE_BUCKET)
     .remove([path]);
 
   if (error) {
@@ -79,6 +150,16 @@ async function tryDeleteStoredProfileImage(path?: string | null) {
   }
 }
 
+async function tryDeleteStoredSignatureVoice(path?: string | null) {
+  if (!path) return;
+
+  try {
+    await deleteStoredSignatureVoice(path);
+  } catch (err) {
+    console.error("[supabase-signature-voice-delete-error]", err);
+  }
+}
+
 const profileImageUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -88,6 +169,22 @@ const profileImageUpload = multer({
   fileFilter: (_req, file, cb) => {
     if (!allowedProfileImageMimeTypes.has(file.mimetype)) {
       cb(new Error("프로필 이미지는 JPG 또는 PNG 파일만 업로드할 수 있습니다."));
+      return;
+    }
+
+    cb(null, true);
+  },
+});
+
+const signatureVoiceUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: SIGNATURE_VOICE_MAX_SIZE,
+    files: 1,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (!allowedSignatureVoiceMimeTypes.has(file.mimetype)) {
+      cb(new Error("시그니처 보이스는 MP3, WAV, M4A, WEBM 오디오 파일만 업로드할 수 있습니다."));
       return;
     }
 
@@ -111,6 +208,22 @@ function handleProfileImageUpload(req: AuthRequest, res: Response, next: NextFun
   });
 }
 
+function handleSignatureVoiceUpload(req: AuthRequest, res: Response, next: NextFunction) {
+  signatureVoiceUpload.single("voice")(req, res, (err: unknown) => {
+    if (!err) {
+      next();
+      return;
+    }
+
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      return errorResponse(res, "BAD_REQUEST", "시그니처 보이스는 10MB 이하만 업로드할 수 있습니다.", [], 400);
+    }
+
+    const message = err instanceof Error ? err.message : "시그니처 보이스 업로드 요청이 올바르지 않습니다.";
+    return errorResponse(res, "BAD_REQUEST", message, [], 400);
+  });
+}
+
 function assertOwnProfileImagePath(req: AuthRequest, res: Response, path: string) {
   if (isOwnProfileImagePath(req.user!.userId, path)) return true;
 
@@ -124,6 +237,24 @@ function assertOwnProfileImagePath(req: AuthRequest, res: Response, path: string
   return false;
 }
 
+function assertOwnSignatureVoicePath(req: AuthRequest, res: Response, path: string) {
+  if (isOwnSignatureVoicePath(req.user!.userId, path)) return true;
+
+  errorResponse(
+    res,
+    "VALIDATION_ERROR",
+    "시그니처 보이스는 본인 계정으로 업로드된 오디오 경로만 사용할 수 있습니다.",
+    [],
+    400
+  );
+  return false;
+}
+
+const optionalStoragePath = z.preprocess(
+  (value) => (typeof value === "string" && value.trim().length === 0 ? undefined : value),
+  z.string().trim().max(2048, "파일 경로는 2048자 이하로 입력해 주세요.").optional()
+);
+
 // ── Zod 스키마 ──────────────────────────────────────────────
 
 const profileSchema = z
@@ -135,6 +266,8 @@ const profileSchema = z
       .min(1, "프로필 이미지를 업로드해 주세요.")
       .max(2048, "이미지 경로는 2048자 이하로 입력해 주세요."),
     profile_image_url: z.string().url().max(4096).optional(),
+    signature_voice_path: optionalStoragePath,
+    signature_voice_url: z.string().url().max(4096).optional(),
     headline: z.string().trim().min(1, "한 줄 소개를 입력해 주세요.").max(150),
     bio: z.string().trim().min(1, "자기소개를 입력해 주세요.").max(2000),
     region: z.string().trim().min(1, "활동 지역을 입력해 주세요.").max(100),
@@ -247,6 +380,112 @@ router.post(
   }
 );
 
+// POST /api/freelancer/signature-voice - Supabase Storage 시그니처 보이스 업로드
+router.post(
+  "/signature-voice",
+  authenticate,
+  requireFreelancer,
+  handleSignatureVoiceUpload,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const file = req.file;
+
+      if (!file) {
+        return errorResponse(res, "BAD_REQUEST", "업로드할 시그니처 보이스 파일을 선택해 주세요.", [], 400);
+      }
+
+      if (!hasValidSignatureVoiceSignature(file)) {
+        return errorResponse(
+          res,
+          "BAD_REQUEST",
+          "시그니처 보이스는 정상적인 MP3, WAV, M4A, WEBM 오디오 파일만 업로드할 수 있습니다.",
+          [],
+          400
+        );
+      }
+
+      let supabase;
+      try {
+        supabase = getSupabaseSignatureVoiceAdminClient();
+      } catch (err) {
+        console.error("[supabase-storage-config-error]", err);
+        return errorResponse(res, "SERVER_ERROR", "시그니처 보이스 저장소 설정이 누락되었습니다.", [], 500);
+      }
+
+      const storagePath = buildSignatureVoiceStoragePath(req.user!.userId, file);
+      const { data, error } = await supabase.storage
+        .from(SIGNATURE_VOICE_BUCKET)
+        .upload(storagePath, file.buffer, {
+          contentType: file.mimetype,
+          cacheControl: "31536000",
+          upsert: false,
+        });
+
+      if (error || !data) {
+        console.error("[supabase-signature-voice-upload-error]", error);
+        return errorResponse(res, "SERVER_ERROR", "시그니처 보이스 업로드에 실패했습니다.", [], 500);
+      }
+
+      const signedUrl = await createSignatureVoiceSignedUrl(data.path);
+
+      return successResponse(
+        res,
+        { url: signedUrl, path: data.path },
+        "시그니처 보이스가 업로드되었습니다.",
+        201
+      );
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// DELETE /api/freelancer/signature-voice - 현재 시그니처 보이스 삭제
+router.delete(
+  "/signature-voice",
+  authenticate,
+  requireFreelancer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const profile = await prisma.freelancerProfile.findUnique({
+        where: { user_id: req.user!.userId },
+        select: { id: true, signature_voice_path: true },
+      });
+
+      if (!profile) {
+        return errorResponse(res, "NOT_FOUND", "프리랜서 프로필을 찾을 수 없습니다.", [], 404);
+      }
+
+      if (!profile.signature_voice_path) {
+        return successResponse(res, null, "삭제할 시그니처 보이스가 없습니다.");
+      }
+
+      if (!isOwnSignatureVoicePath(req.user!.userId, profile.signature_voice_path)) {
+        return errorResponse(res, "FORBIDDEN", "삭제할 수 없는 시그니처 보이스입니다.", [], 403);
+      }
+
+      try {
+        await deleteStoredSignatureVoice(profile.signature_voice_path);
+      } catch (err) {
+        console.error("[supabase-signature-voice-delete-error]", err);
+        return errorResponse(res, "SERVER_ERROR", "시그니처 보이스 삭제에 실패했습니다.", [], 500);
+      }
+
+      await prisma.freelancerProfile.update({
+        where: { id: profile.id },
+        data: {
+          signature_voice_path: null,
+          signature_voice_url: null,
+        },
+      });
+
+      return successResponse(res, null, "시그니처 보이스가 삭제되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // DELETE /api/freelancer/profile-image - 현재 프로필 이미지 삭제
 router.delete(
   "/profile-image",
@@ -303,9 +542,11 @@ router.post(
       const body = profileSchema.parse(req.body);
 
       if (!assertOwnProfileImagePath(req, res, body.profile_image_path)) return;
+      if (body.signature_voice_path && !assertOwnSignatureVoicePath(req, res, body.signature_voice_path)) return;
 
       const existing = await prisma.freelancerProfile.findUnique({
         where: { user_id: req.user!.userId },
+        select: { profile_image_path: true, signature_voice_path: true },
       });
 
       if (!existing) {
@@ -313,6 +554,8 @@ router.post(
       }
 
       const previousProfileImagePath = existing.profile_image_path;
+      const previousSignatureVoicePath = existing.signature_voice_path;
+      const signatureVoicePath = body.signature_voice_path ?? existing.signature_voice_path;
 
       const profile = await prisma.freelancerProfile.update({
         where: { user_id: req.user!.userId },
@@ -320,6 +563,8 @@ router.post(
           ...body,
           profile_image_url: null,
           profile_image_path: body.profile_image_path,
+          signature_voice_url: null,
+          signature_voice_path: signatureVoicePath,
           status: "pending_review",
         },
       });
@@ -332,7 +577,16 @@ router.post(
         void tryDeleteStoredProfileImage(previousProfileImagePath);
       }
 
-      const responseProfile = await attachSignedProfileImageUrl(profile);
+      if (
+        previousSignatureVoicePath &&
+        previousSignatureVoicePath !== signatureVoicePath &&
+        isOwnSignatureVoicePath(req.user!.userId, previousSignatureVoicePath)
+      ) {
+        void tryDeleteStoredSignatureVoice(previousSignatureVoicePath);
+      }
+
+      const responseProfileWithImage = await attachSignedProfileImageUrl(profile);
+      const responseProfile = await attachSignedSignatureVoiceUrl(responseProfileWithImage);
 
       return successResponse(res, responseProfile, "등록 신청이 완료되었습니다. 관리자 검수 후 승인됩니다.", 201);
     } catch (err) {
@@ -361,7 +615,8 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "프로필을 찾을 수 없습니다.", [], 404);
       }
 
-      const responseProfile = await attachSignedProfileImageUrl(profile);
+      const responseProfileWithImage = await attachSignedProfileImageUrl(profile);
+      const responseProfile = await attachSignedSignatureVoiceUrl(responseProfileWithImage);
 
       return successResponse(res, responseProfile);
     } catch (err) {
@@ -380,10 +635,11 @@ router.patch(
       const body = profileSchema.parse(req.body);
 
       if (!assertOwnProfileImagePath(req, res, body.profile_image_path)) return;
+      if (body.signature_voice_path && !assertOwnSignatureVoicePath(req, res, body.signature_voice_path)) return;
 
       const existing = await prisma.freelancerProfile.findUnique({
         where: { user_id: req.user!.userId },
-        select: { profile_image_path: true },
+        select: { profile_image_path: true, signature_voice_path: true },
       });
 
       if (!existing) {
@@ -391,6 +647,8 @@ router.patch(
       }
 
       const previousProfileImagePath = existing.profile_image_path;
+      const previousSignatureVoicePath = existing.signature_voice_path;
+      const signatureVoicePath = body.signature_voice_path ?? existing.signature_voice_path;
 
       const profile = await prisma.freelancerProfile.update({
         where: { user_id: req.user!.userId },
@@ -398,6 +656,8 @@ router.patch(
           ...body,
           profile_image_url: null,
           profile_image_path: body.profile_image_path,
+          signature_voice_url: null,
+          signature_voice_path: signatureVoicePath,
         },
       });
 
@@ -409,7 +669,16 @@ router.patch(
         void tryDeleteStoredProfileImage(previousProfileImagePath);
       }
 
-      const responseProfile = await attachSignedProfileImageUrl(profile);
+      if (
+        previousSignatureVoicePath &&
+        previousSignatureVoicePath !== signatureVoicePath &&
+        isOwnSignatureVoicePath(req.user!.userId, previousSignatureVoicePath)
+      ) {
+        void tryDeleteStoredSignatureVoice(previousSignatureVoicePath);
+      }
+
+      const responseProfileWithImage = await attachSignedProfileImageUrl(profile);
+      const responseProfile = await attachSignedSignatureVoiceUrl(responseProfileWithImage);
 
       return successResponse(res, responseProfile, "프로필이 수정되었습니다.");
     } catch (err) {

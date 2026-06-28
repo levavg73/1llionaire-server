@@ -167,6 +167,8 @@ model FreelancerProfile {
   display_name             String?
   profile_image_url        String?
   profile_image_path       String?
+  signature_voice_url      String?
+  signature_voice_path     String?
   headline                 String?
   bio                      String?
   region                   String?

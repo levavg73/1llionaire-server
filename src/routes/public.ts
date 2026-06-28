@@ -5,6 +5,7 @@ import prisma from "../config/database";
 import { successResponse, listResponse, parsePagination, errorResponse } from "../utils/response";
 import { setPublicCache } from "../utils/cache";
 import { attachSignedProfileImageUrl, attachSignedProfileImageUrls } from "../utils/profileImages";
+import { attachSignedSignatureVoiceUrl, attachSignedSignatureVoiceUrls } from "../utils/signatureVoice";
 
 const router = Router();
 
@@ -171,6 +172,8 @@ router.get(
             display_name: true,
             profile_image_url: true,
             profile_image_path: true,
+            signature_voice_url: true,
+            signature_voice_path: true,
             headline: true,
             categories: true,
             styles: true,
@@ -198,8 +201,9 @@ router.get(
       ]);
 
       const statsByFreelancerId = await getPublishedReviewStats(items.map((item) => item.id));
-      const signedItems = await attachSignedProfileImageUrls(items);
-      const publicItems = signedItems.map(({ profile_image_path, ...item }) =>
+      const itemsWithSignedImages = await attachSignedProfileImageUrls(items);
+      const signedItems = await attachSignedSignatureVoiceUrls(itemsWithSignedImages);
+      const publicItems = signedItems.map(({ profile_image_path, signature_voice_path, ...item }) =>
         withPublishedReviewStats(item, statsByFreelancerId)
       );
 
@@ -226,6 +230,8 @@ router.get(
           display_name: true,
           profile_image_url: true,
           profile_image_path: true,
+          signature_voice_url: true,
+          signature_voice_path: true,
           headline: true,
           bio: true,
           region: true,
@@ -266,8 +272,9 @@ router.get(
 
       const statsByFreelancerId = await getPublishedReviewStats([profile.id]);
       const profileWithCurrentStats = withPublishedReviewStats(profile, statsByFreelancerId);
-      const signedProfile = await attachSignedProfileImageUrl(profileWithCurrentStats);
-      const { profile_image_path, ...publicProfile } = signedProfile;
+      const profileWithSignedImage = await attachSignedProfileImageUrl(profileWithCurrentStats);
+      const signedProfile = await attachSignedSignatureVoiceUrl(profileWithSignedImage);
+      const { profile_image_path, signature_voice_path, ...publicProfile } = signedProfile;
 
       return successResponse(res, publicProfile);
     } catch (err) {
