@@ -325,6 +325,173 @@ const quoteSchema = z.object({
     .optional(),
 });
 
+const timeStringSchema = z
+  .string()
+  .trim()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "시간은 HH:mm 형식으로 입력해 주세요.");
+
+const availabilitySlotSchema = z
+  .object({
+    available_date: z
+      .string()
+      .trim()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, "날짜는 YYYY-MM-DD 형식으로 입력해 주세요."),
+    start_time: timeStringSchema,
+    end_time: timeStringSchema,
+    note: z
+      .string()
+      .trim()
+      .max(200, "메모는 200자 이하로 입력해 주세요.")
+      .optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.start_time >= body.end_time) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["end_time"],
+        message: "종료 시간은 시작 시간보다 늦어야 합니다.",
+      });
+    }
+  });
+
+function parseDateOnly(value: string) {
+  return new Date(`${value}T00:00:00.000Z`);
+}
+
+async function getOwnFreelancerProfile(userId: string) {
+  return prisma.freelancerProfile.findUnique({
+    where: { user_id: userId },
+    select: { id: true },
+  });
+}
+
+// ─── 가능 시간대 ───────────────────────────────────────────────
+
+// GET /api/freelancer/availability
+router.get(
+  "/availability",
+  authenticate,
+  requireFreelancer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const profile = await getOwnFreelancerProfile(req.user!.userId);
+
+      if (!profile) {
+        return errorResponse(res, "NOT_FOUND", "프로필을 찾을 수 없습니다.", [], 404);
+      }
+
+      const slots = await prisma.freelancerAvailabilitySlot.findMany({
+        where: { freelancer_id: profile.id },
+        orderBy: [{ available_date: "asc" }, { start_time: "asc" }],
+      });
+
+      return successResponse(res, slots);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/freelancer/availability
+router.post(
+  "/availability",
+  authenticate,
+  requireFreelancer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const body = availabilitySlotSchema.parse(req.body);
+      const profile = await getOwnFreelancerProfile(req.user!.userId);
+
+      if (!profile) {
+        return errorResponse(res, "NOT_FOUND", "프로필을 찾을 수 없습니다.", [], 404);
+      }
+
+      const slot = await prisma.freelancerAvailabilitySlot.create({
+        data: {
+          freelancer_id: profile.id,
+          available_date: parseDateOnly(body.available_date),
+          start_time: body.start_time,
+          end_time: body.end_time,
+          note: body.note || null,
+        },
+      });
+
+      return successResponse(res, slot, "가능 시간대가 등록되었습니다.", 201);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// PATCH /api/freelancer/availability/:id
+router.patch(
+  "/availability/:id",
+  authenticate,
+  requireFreelancer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const body = availabilitySlotSchema.parse(req.body);
+      const profile = await getOwnFreelancerProfile(req.user!.userId);
+
+      if (!profile) {
+        return errorResponse(res, "NOT_FOUND", "프로필을 찾을 수 없습니다.", [], 404);
+      }
+
+      const existing = await prisma.freelancerAvailabilitySlot.findFirst({
+        where: { id: req.params.id, freelancer_id: profile.id },
+      });
+
+      if (!existing) {
+        return errorResponse(res, "NOT_FOUND", "가능 시간대를 찾을 수 없습니다.", [], 404);
+      }
+
+      const slot = await prisma.freelancerAvailabilitySlot.update({
+        where: { id: req.params.id },
+        data: {
+          available_date: parseDateOnly(body.available_date),
+          start_time: body.start_time,
+          end_time: body.end_time,
+          note: body.note || null,
+        },
+      });
+
+      return successResponse(res, slot, "가능 시간대가 수정되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// DELETE /api/freelancer/availability/:id
+router.delete(
+  "/availability/:id",
+  authenticate,
+  requireFreelancer,
+  async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const profile = await getOwnFreelancerProfile(req.user!.userId);
+
+      if (!profile) {
+        return errorResponse(res, "NOT_FOUND", "프로필을 찾을 수 없습니다.", [], 404);
+      }
+
+      const existing = await prisma.freelancerAvailabilitySlot.findFirst({
+        where: { id: req.params.id, freelancer_id: profile.id },
+      });
+
+      if (!existing) {
+        return errorResponse(res, "NOT_FOUND", "가능 시간대를 찾을 수 없습니다.", [], 404);
+      }
+
+      await prisma.freelancerAvailabilitySlot.delete({ where: { id: req.params.id } });
+
+      return successResponse(res, null, "가능 시간대가 삭제되었습니다.");
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // ─── 프로필 ─────────────────────────────────────────────────
 
 // POST /api/freelancer/profile-image - Supabase Storage 프로필 이미지 업로드

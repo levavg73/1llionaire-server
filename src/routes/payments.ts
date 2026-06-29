@@ -116,9 +116,19 @@ router.post(
         return errorResponse(res, "CONFLICT", "이미 결제가 완료된 예약입니다.", [], 409);
       }
 
-      // [P0] 계약서가 존재하는 경우 양측 서명 완료 여부 검증
-      // 계약서 없이 결제 진행은 허용 (MVP: 계약서는 선택)
-      if (booking.contract && booking.contract.status !== "fully_signed") {
+      // 계약서 작성과 양측 전자서명이 끝난 뒤에만 결제를 허용합니다.
+      // MVP에서도 계약/결제 플로우의 증빙 순서를 보장하기 위한 필수 정책입니다.
+      if (!booking.contract) {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "계약서가 생성된 후 결제할 수 있습니다. 가격 제안을 확정해 계약서를 먼저 생성해 주세요.",
+          [],
+          409
+        );
+      }
+
+      if (booking.contract.status !== "fully_signed") {
         return errorResponse(
           res,
           "CONFLICT",

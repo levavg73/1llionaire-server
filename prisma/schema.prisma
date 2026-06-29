@@ -197,12 +197,29 @@ model FreelancerProfile {
   quotes          Quote[]
   bookings        Booking[]         @relation("FreelancerBookings")
   chat_rooms      ChatRoom[]        @relation("FreelancerChatRooms")
+  availability_slots FreelancerAvailabilitySlot[]
   reviews         Review[]          @relation("FreelancerReviews")
   freelancer_reviews_written FreelancerReview[] @relation("FreelancerFreelancerReviews")
   saved_by               SavedFreelancer[]  @relation("SavedByCustomers")
 
   @@index([status])
   @@map("freelancer_profiles")
+}
+
+model FreelancerAvailabilitySlot {
+  id             String   @id @default(cuid())
+  freelancer_id  String
+  available_date DateTime
+  start_time     String
+  end_time       String
+  note           String?
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  freelancer FreelancerProfile @relation(fields: [freelancer_id], references: [id], onDelete: Cascade)
+
+  @@index([freelancer_id, available_date])
+  @@map("freelancer_availability_slots")
 }
 
 model Portfolio {

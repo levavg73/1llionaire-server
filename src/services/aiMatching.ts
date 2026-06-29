@@ -138,6 +138,12 @@ type MatchingCandidate = {
     end_time: string;
     booking_status: string;
   }>;
+  availability_slots: Array<{
+    available_date: Date;
+    start_time: string;
+    end_time: string;
+    note: string | null;
+  }>;
   portfolios: Array<{
     portfolio_type: string;
     title: string;
@@ -477,6 +483,20 @@ function hasScheduleConflict(
   });
 }
 
+function hasAvailabilitySlotForRequest(
+  request: RequestForMatching,
+  candidate: MatchingCandidate,
+) {
+  // MVP policy: if a freelancer has not entered any availability slots,
+  // treat them as available so early supply is not blocked.
+  if (candidate.availability_slots.length === 0) return true;
+
+  return candidate.availability_slots.some((slot) => {
+    if (!isSameDate(request.event_date, slot.available_date)) return false;
+    return slot.start_time <= request.start_time && slot.end_time >= request.end_time;
+  });
+}
+
 function isBudgetMatch(
   request: RequestForMatching,
   candidate: MatchingCandidate,
@@ -494,6 +514,10 @@ function scoreCandidate(
   candidate: MatchingCandidate,
 ): CandidateScore | null {
   if (hasScheduleConflict(request, candidate)) {
+    return null;
+  }
+
+  if (!hasAvailabilitySlotForRequest(request, candidate)) {
     return null;
   }
 
@@ -921,6 +945,16 @@ function buildCandidateContextForAi(scored: CandidateScore) {
     voice_score: candidate.voice_score,
     avg_rating: candidate.avg_rating,
     review_count: candidate.review_count,
+    availability_slots: candidate.availability_slots.map((slot) => ({
+      available_date: formatDateForAi(slot.available_date),
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      note: truncate(slot.note, 120),
+    })),
+    availability_policy:
+      candidate.availability_slots.length === 0
+        ? "가능 시간대 미입력 - MVP 정책상 우선 가능 후보로 간주"
+        : "요청서 날짜와 시간이 등록된 가능 시간대 안에 포함됨",
     rule_based_score: scored.score,
     rule_based_reasons: scored.reasons,
     portfolios: candidate.portfolios.map((portfolio) => ({
@@ -1018,6 +1052,7 @@ function buildAiRecommendationSystemPrompt() {
     "기업행사/스타트업/컨퍼런스/세미나/포럼/데모데이/IR 요청에는 웨딩 전용, 돌잔치 전용, 라이브커머스 전용 후보를 추천하지 마세요. 단, 해당 후보 자료에 기업행사/컨퍼런스/공식행사/IR/데모데이 경험이 명확하면 추천 가능합니다.",
     "후보자의 프로필, 후기, 포트폴리오에 없는 경력·실적·장점을 지어내지 마세요.",
     "필수 언어, 지역, 출장, 대본 작성, 리허설 조건을 충족하지 못하는 후보는 추천하지 마세요.",
+    "서버가 요청서 날짜/시간과 진행자 가능 시간대를 먼저 필터링했습니다. 가능 시간대를 입력하지 않은 진행자는 MVP 정책상 우선 가능 후보로 간주됩니다.",
     "후보가 부족하면 억지로 5명을 채우지 말고 추천 가능한 후보만 반환하세요.",
     "추천 사유는 고객에게 바로 노출됩니다. 한국어 존댓말 2~3문장으로 자연스럽고 구체적으로 작성하세요.",
     "각 추천 사유는 요청서 조건 1개 이상, 후보자의 실제 근거 2개 이상, 기대 효과 1개를 연결해야 합니다.",
@@ -1040,6 +1075,7 @@ function buildAiRecommendationUserPrompt(
         "프로필/포트폴리오/후기에 없는 경력 생성 금지",
         "추천 사유에는 요청서 조건과 후보 실제 근거를 연결",
         "후보가 부족하면 억지로 채우지 않기",
+        "후보의 availability_policy를 참고하되, 가능 시간대 미입력자를 불이익 처리하지 않기",
       ],
       output_schema: {
         request_analysis: {
@@ -1378,6 +1414,15 @@ export async function generateAiRecommendationsForRequest(params: {
           start_time: true,
           end_time: true,
           booking_status: true,
+        },
+      },
+      availability_slots: {
+        orderBy: [{ available_date: "asc" }, { start_time: "asc" }],
+        select: {
+          available_date: true,
+          start_time: true,
+          end_time: true,
+          note: true,
         },
       },
       portfolios: {
