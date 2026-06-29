@@ -1,7 +1,8 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { env } from "../config/env";
 
 export const SIGNATURE_VOICE_MAX_SIZE = 10 * 1024 * 1024;
-export const SIGNATURE_VOICE_BUCKET = process.env.SUPABASE_SIGNATURE_VOICE_BUCKET ?? "signature-voices";
+export const SIGNATURE_VOICE_BUCKET = env.SUPABASE_SIGNATURE_VOICE_BUCKET;
 export const SIGNATURE_VOICE_SIGNED_URL_EXPIRES_IN = 60 * 60;
 const SIGNATURE_VOICE_SIGNED_URL_CACHE_TTL_MS = Math.max(
   (SIGNATURE_VOICE_SIGNED_URL_EXPIRES_IN - 60) * 1000,
@@ -37,8 +38,8 @@ export function isOwnSignatureVoicePath(userId: string, path?: string | null) {
 }
 
 export function getSupabaseSignatureVoiceAdminClient() {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const supabaseUrl = env.SUPABASE_URL;
+  const supabaseKey = env.SUPABASE_SECRET_KEY ?? env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!supabaseUrl || !supabaseKey) {
     throw new Error("Supabase Storage 환경변수가 설정되지 않았습니다.");

@@ -42,7 +42,9 @@ const envSchema = z.object({
   // ─── Supabase Storage ─────────────────────────────────────
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_SECRET_KEY: z.string().optional(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
   SUPABASE_PROFILE_IMAGE_BUCKET: z.string().default("profile-images"),
+  SUPABASE_SIGNATURE_VOICE_BUCKET: z.string().default("signature-voices"),
 
   // ─── 소셜 로그인 (카카오) ─────────────────────────────────
   KAKAO_CLIENT_ID: z.string().optional(),
