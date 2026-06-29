@@ -1,6 +1,7 @@
 import { Router, Response, NextFunction } from "express";
 import crypto from "node:crypto";
 import multer from "multer";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
@@ -839,14 +840,17 @@ router.get(
         return errorResponse(res, "NOT_FOUND", "프로필을 찾을 수 없습니다.", [], 404);
       }
 
-      const where = { freelancer_id: profile.id };
+      const where: Prisma.RecommendationWhereInput = {
+        freelancer_id: profile.id,
+        status: { in: ["consultation_requested", "selected"] },
+      };
 
       const [items, total] = await Promise.all([
         prisma.recommendation.findMany({
           where,
           skip,
           take: limit,
-          orderBy: { created_at: "desc" },
+          orderBy: { updated_at: "desc" },
           include: {
             request: {
               select: {
@@ -854,10 +858,35 @@ router.get(
                 event_title: true,
                 event_type: true,
                 event_date: true,
+                start_time: true,
+                end_time: true,
                 region: true,
+                venue: true,
                 budget_min: true,
                 budget_max: true,
+                description: true,
                 status: true,
+                bookings: {
+                  where: { freelancer_id: profile.id },
+                  orderBy: { created_at: "desc" },
+                  take: 1,
+                  select: {
+                    id: true,
+                    booking_status: true,
+                    payment_status: true,
+                    final_price: true,
+                    chat_room: { select: { id: true } },
+                    contract: {
+                      select: {
+                        id: true,
+                        status: true,
+                        customer_signed_at: true,
+                        freelancer_signed_at: true,
+                        fully_signed_at: true,
+                      },
+                    },
+                  },
+                },
               },
             },
           },
