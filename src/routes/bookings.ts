@@ -563,6 +563,14 @@ router.patch(
       }
 
       if (booking.booking_status !== "pending") {
+        if (booking.booking_status === "accepted") {
+          return successResponse(
+            res,
+            await serializeBooking(booking),
+            "이미 수락된 요청입니다.",
+          );
+        }
+
         return errorResponse(
           res,
           "CONFLICT",
@@ -612,7 +620,7 @@ router.patch(
             where: {
               request_id: booking.request_id,
               freelancer_id: booking.freelancer_id,
-              status: { in: ["consultation_requested", "sent", "viewed"] },
+              status: { in: ["consultation_requested", "sent", "viewed", "selected"] },
             },
             data: { status: "selected" },
           });
