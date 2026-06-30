@@ -4,7 +4,8 @@
  * - POST /api/contracts/:bookingId/generate — 계약서 자동 생성(미서명)
  * - POST /api/contracts/:bookingId/accept   — 계약하기: 계약서 생성 + 현재 사용자 전자서명
  * - GET  /api/contracts/:bookingId          — 계약서 조회
- * - POST /api/contracts/:bookingId/sign     — 기존 전자서명 호환 엔드포인트
+ * - PATCH /api/contracts/:bookingId          — 서명 전 계약서 초안 수정
+ * - POST /api/contracts/:bookingId/sign     — 계약서 확인 후 현재 당사자 서명
  * - GET  /api/contracts/:bookingId/html     — HTML 렌더링(브라우저 인쇄용)
  * - GET  /api/contracts/:bookingId/pdf      — PDF 다운로드
  *
@@ -16,6 +17,7 @@
 
 import { Router, Response, NextFunction } from "express";
 import crypto from "crypto";
+import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import prisma from "../config/database";
 import { authenticate } from "../middleware/auth";
@@ -36,6 +38,9 @@ type ContractClause = {
 interface ContractContent {
   version: "2.0";
   generated_at: string;
+  draft_revision?: number;
+  draft_updated_at?: string;
+  draft_updated_by?: string;
   contract_title: string;
   counterparty_type: "private" | "public";
   customer: {
@@ -102,6 +107,30 @@ const CONTRACT_CREATABLE_STATUSES = [
   "completed",
 ] as const;
 
+const CONTRACT_PLATFORM_FEE_RATE = 0.1;
+
+const updateContractSchema = z.object({
+  event_title: z.string().trim().min(1, "행사명을 입력해 주세요.").max(200),
+  event_date: z.string().trim().min(1, "행사 날짜를 입력해 주세요."),
+  start_time: z.string().trim().min(1, "시작 시간을 입력해 주세요.").max(20),
+  end_time: z.string().trim().min(1, "종료 시간을 입력해 주세요.").max(20),
+  region: z.string().trim().max(100).nullable().optional(),
+  venue: z.string().trim().max(200).nullable().optional(),
+  role: z.string().trim().min(1, "주요 역할을 입력해 주세요.").max(200),
+  required_language: z.string().trim().max(100).nullable().optional(),
+  description: z.string().trim().max(2000).nullable().optional(),
+  script_required: z.boolean().optional(),
+  rehearsal_required: z.boolean().optional(),
+  travel_required: z.boolean().optional(),
+  final_price: z.number().int().positive("총 계약 금액을 입력해 주세요."),
+  media_scope: z.string().trim().min(1, "활용 매체를 입력해 주세요.").max(500),
+  usage_period: z.string().trim().min(1, "활용 기간을 입력해 주세요.").max(300),
+  commercial_reuse_note: z.string().trim().min(1, "추가 활용 조건을 입력해 주세요.").max(800),
+  cancellation_policy: z.array(z.string().trim().min(1).max(500)).min(1).max(8),
+});
+
+type UpdateContractInput = z.infer<typeof updateContractSchema>;
+
 function formatNullable(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
@@ -113,6 +142,23 @@ function toDateOnly(value: Date): string {
 
 function toCurrency(value: number | null | undefined): string {
   return `${Number(value ?? 0).toLocaleString("ko-KR")}원`;
+}
+
+function calculateContractAmounts(finalPrice: number) {
+  const platformFee = Math.floor(finalPrice * CONTRACT_PLATFORM_FEE_RATE);
+  return {
+    finalPrice,
+    platformFee,
+    freelancerAmount: finalPrice - platformFee,
+  };
+}
+
+function parseContractDate(value: string): Date {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) {
+    throw Object.assign(new Error("유효한 행사 날짜를 입력해 주세요."), { statusCode: 400, code: "VALIDATION_ERROR" });
+  }
+  return date;
 }
 
 function buildSignatureHash(userId: string, bookingId: string, timestamp: string): string {
@@ -235,6 +281,55 @@ function buildContractContent(
       "천재지변 등 불가항력 사유는 상호 협의하여 조정한다.",
     ],
     clauses: buildStandardClauses(isPublic),
+  };
+}
+
+function applyContractDraftUpdates(
+  current: ContractContent,
+  input: UpdateContractInput,
+  updatedBy: string
+): ContractContent {
+  const amounts = calculateContractAmounts(input.final_price);
+  const depositRate = current.counterparty_type === "public" ? 0 : current.payment.deposit_rate_percent || 30;
+  const depositAmount = depositRate ? Math.floor(amounts.finalPrice * (depositRate / 100)) : 0;
+  const balanceAmount = amounts.finalPrice - depositAmount;
+
+  return {
+    ...current,
+    contract_title: `${input.event_title} 진행 및 출연 용역 계약`,
+    draft_revision: (current.draft_revision ?? 0) + 1,
+    draft_updated_at: new Date().toISOString(),
+    draft_updated_by: updatedBy,
+    service: {
+      ...current.service,
+      event_title: input.event_title,
+      event_date: input.event_date,
+      start_time: input.start_time,
+      end_time: input.end_time,
+      region: formatNullable(input.region),
+      venue: formatNullable(input.venue),
+      role: input.role,
+      required_language: formatNullable(input.required_language),
+      description: formatNullable(input.description),
+      script_required: input.script_required ?? current.service.script_required,
+      rehearsal_required: input.rehearsal_required ?? current.service.rehearsal_required,
+      travel_required: input.travel_required ?? current.service.travel_required,
+    },
+    payment: {
+      ...current.payment,
+      final_price: amounts.finalPrice,
+      platform_fee: amounts.platformFee,
+      freelancer_amount: amounts.freelancerAmount,
+      deposit_amount: depositAmount,
+      balance_amount: balanceAmount,
+    },
+    usage_rights: {
+      ...current.usage_rights,
+      media_scope: input.media_scope,
+      usage_period: input.usage_period,
+      commercial_reuse_note: input.commercial_reuse_note,
+    },
+    cancellation_policy: input.cancellation_policy,
   };
 }
 
@@ -538,8 +633,88 @@ router.post("/:bookingId/generate", async (req: AuthRequest, res: Response, next
   }
 });
 
+// ─── PATCH /api/contracts/:bookingId ──────────────────────────
+// 계약서 초안 수정: 양측 모두 서명하기 전까지만 가능
+
+router.patch("/:bookingId", async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const loaded = await loadAuthorizedBooking(req, res);
+    if (!loaded) return;
+    const { booking } = loaded;
+
+    const contract = booking.contract;
+    if (!contract) {
+      return errorResponse(res, "NOT_FOUND", "계약서 초안이 없습니다.", [], 404);
+    }
+
+    if (
+      contract.status !== "draft" ||
+      contract.customer_signed_at ||
+      contract.freelancer_signed_at ||
+      contract.fully_signed_at
+    ) {
+      return errorResponse(
+        res,
+        "CONFLICT",
+        "서명이 시작된 계약서는 직접 수정할 수 없습니다. 변경이 필요하면 새 계약 절차를 진행해 주세요.",
+        [],
+        409
+      );
+    }
+
+    const input = updateContractSchema.parse(req.body);
+    const nextContent = applyContractDraftUpdates(getContractContent(contract), input, req.user!.userId);
+    const amounts = calculateContractAmounts(input.final_price);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.booking.update({
+        where: { id: booking.id },
+        data: {
+          event_title: input.event_title,
+          event_date: parseContractDate(input.event_date),
+          start_time: input.start_time,
+          end_time: input.end_time,
+          venue: formatNullable(input.venue),
+          final_price: amounts.finalPrice,
+          platform_fee: amounts.platformFee,
+          freelancer_amount: amounts.freelancerAmount,
+        },
+      });
+
+      const updatedContract = await tx.contract.update({
+        where: { id: contract.id },
+        data: {
+          content_json: nextContent as unknown as Prisma.InputJsonValue,
+          status: "draft",
+        },
+      });
+
+      if (booking.chat_room) {
+        await tx.chatMessage.create({
+          data: {
+            room_id: booking.chat_room.id,
+            sender_id: null,
+            message: "계약서 초안 조건이 수정되었습니다. 변경된 조건을 확인한 뒤 서명해 주세요.",
+            message_type: "system",
+          },
+        });
+        await tx.chatRoom.update({
+          where: { id: booking.chat_room.id },
+          data: { last_message_at: new Date() },
+        });
+      }
+
+      return updatedContract;
+    });
+
+    return successResponse(res, updated, "계약서 초안이 수정되었습니다.");
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── POST /api/contracts/:bookingId/accept ───────────────────
-// 계약하기: 계약서를 자동 생성하고 현재 당사자의 전자서명을 기록합니다.
+// 기존 화면 호환용: 계약서를 자동 생성하고 현재 당사자의 전자서명을 기록합니다.
 
 router.post("/:bookingId/accept", async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
@@ -1008,6 +1183,10 @@ router.get("/:bookingId/pdf", async (req: AuthRequest, res: Response, next: Next
     const contract = loaded.booking.contract;
     if (!contract) {
       return errorResponse(res, "NOT_FOUND", "계약서를 찾을 수 없습니다.", [], 404);
+    }
+
+    if (contract.status !== "fully_signed") {
+      return errorResponse(res, "CONFLICT", "양측 서명 완료 후 PDF 계약서를 다운로드할 수 있습니다.", [], 409);
     }
 
     const content = getContractContent(contract);

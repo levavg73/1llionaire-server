@@ -162,6 +162,7 @@ router.post("/rooms/:roomId/messages", async (req: AuthRequest, res: Response, n
     }
 
     const otherUserId = getOtherParticipantUserId(room, req.user!.userId);
+    const otherParticipantLink = getOtherParticipantChatLink(room, req.user!.userId);
 
     const message = await prisma.$transaction(async (tx) => {
       const created = await tx.chatMessage.create({
@@ -182,15 +183,17 @@ router.post("/rooms/:roomId/messages", async (req: AuthRequest, res: Response, n
         data: { last_message_at: new Date() },
       });
 
-      await createNotification(tx, {
-        user_id: otherUserId,
-        type: "chat_message",
-        title: "새 상담 메시지",
-        message: `${req.user!.email} 님이 메시지를 보냈습니다.`,
-        link_url: getOtherParticipantChatLink(room, req.user!.userId),
-      });
-
       return created;
+    });
+
+    void createNotification(prisma, {
+      user_id: otherUserId,
+      type: "chat_message",
+      title: "새 상담 메시지",
+      message: `${req.user!.email} 님이 메시지를 보냈습니다.`,
+      link_url: otherParticipantLink,
+    }).catch((notificationError) => {
+      console.error("Failed to create chat message notification", notificationError);
     });
 
     return successResponse(res, message, "메시지가 전송되었습니다.", 201);
