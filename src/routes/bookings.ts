@@ -217,6 +217,119 @@ function isContractLocked(contract?: { status?: string | null } | null) {
   return contract?.status === "fully_signed";
 }
 
+type AcceptedBookingSideEffectInput = {
+  id: string;
+  request_id?: string | null;
+  freelancer_id: string;
+  customer_id: string;
+  event_title: string;
+};
+
+const bookingDetailInclude = {
+  customer: { select: { id: true, name: true } },
+  freelancer: {
+    select: {
+      id: true,
+      user_id: true,
+      display_name: true,
+      profile_image_url: true,
+      profile_image_path: true,
+    },
+  },
+  chat_room: true,
+  offers: { orderBy: { created_at: "desc" }, take: 5 },
+  contract: {
+    select: {
+      id: true,
+      status: true,
+      customer_signed_at: true,
+      freelancer_signed_at: true,
+      fully_signed_at: true,
+    },
+  },
+} satisfies Prisma.BookingInclude;
+
+async function syncAcceptedBookingSideEffects(
+  booking: AcceptedBookingSideEffectInput,
+  roomId: string,
+) {
+  if (booking.request_id) {
+    try {
+      await prisma.eventRequest.updateMany({
+        where: { id: booking.request_id },
+        data: { status: "consulting" },
+      });
+
+      await prisma.recommendation.updateMany({
+        where: {
+          request_id: booking.request_id,
+          freelancer_id: booking.freelancer_id,
+          status: { in: ["consultation_requested", "sent", "viewed", "selected"] },
+        },
+        data: { status: "selected" },
+      });
+
+      const otherRecs = await prisma.recommendation.findMany({
+        where: {
+          request_id: booking.request_id,
+          freelancer_id: { not: booking.freelancer_id },
+          status: {
+            in: ["draft", "sent", "viewed", "consultation_requested"],
+          },
+        },
+        include: { freelancer: { select: { user_id: true } } },
+      });
+
+      if (otherRecs.length > 0) {
+        await prisma.recommendation.updateMany({
+          where: {
+            request_id: booking.request_id,
+            freelancer_id: { not: booking.freelancer_id },
+            status: {
+              in: ["draft", "sent", "viewed", "consultation_requested"],
+            },
+          },
+          data: { status: "rejected" },
+        });
+
+        await Promise.all(
+          otherRecs.map((rec) =>
+            createNotification(prisma, {
+              user_id: rec.freelancer.user_id,
+              type: "recommendation_auto_rejected",
+              title: "후보 미선택 안내",
+              message: `"${booking.event_title}" 요청서에서 다른 진행자가 최종 수락되어 자동으로 거절 처리되었습니다.`,
+              link_url: "/freelancer/requests",
+            }),
+          ),
+        );
+      }
+    } catch (err) {
+      console.error("[booking-accept-side-effects-failed]", {
+        booking_id: booking.id,
+        request_id: booking.request_id,
+        error: err instanceof Error ? err.message : err,
+      });
+    }
+  }
+
+  try {
+    await createNotification(prisma, {
+      user_id: booking.customer_id,
+      type: "booking_accepted",
+      title: "진행 요청 수락",
+      message: `${booking.event_title} 진행 요청이 수락되었습니다. 상담을 시작해 주세요.`,
+      link_url: customerChatLink(roomId),
+    });
+  } catch (err) {
+    console.error("[booking-accepted-notification-failed]", {
+      booking_id: booking.id,
+      customer_id: booking.customer_id,
+      error: err instanceof Error ? err.message : err,
+    });
+  }
+}
+
 
 // POST /api/bookings - 고객이 프리랜서에게 예약/상담 요청
 router.post(
@@ -574,10 +687,28 @@ router.patch(
 
       if (booking.booking_status !== "pending") {
         if (booking.booking_status === "accepted") {
+          const accepted = await prisma.$transaction(async (tx) => {
+            await tx.chatRoom.upsert({
+              where: { booking_id: booking.id },
+              update: { last_message_at: new Date() },
+              create: {
+                booking_id: booking.id,
+                customer_id: booking.customer_id,
+                freelancer_id: booking.freelancer_id,
+                last_message_at: new Date(),
+              },
+            });
+
+            return tx.booking.findUniqueOrThrow({
+              where: { id: booking.id },
+              include: bookingDetailInclude,
+            });
+          });
+
           return successResponse(
             res,
-            await serializeBooking(booking),
-            "이미 수락된 요청입니다.",
+            await serializeBooking(accepted),
+            "이미 수락된 요청입니다. 상담방으로 이동할 수 있습니다.",
           );
         }
 
@@ -591,122 +722,51 @@ router.patch(
       }
 
       const updated = await prisma.$transaction(async (tx) => {
-        await tx.booking.update({
-          where: { id: booking.id },
+        const acceptedUpdate = await tx.booking.updateMany({
+          where: { id: booking.id, booking_status: "pending" },
           data: { booking_status: "accepted" },
         });
 
-        const room = booking.chat_room?.id
-          ? await tx.chatRoom.update({
-              where: { id: booking.chat_room.id },
-              data: { last_message_at: new Date() },
-            })
-          : await tx.chatRoom.create({
-              data: {
-                booking_id: booking.id,
-                customer_id: booking.customer_id,
-                freelancer_id: booking.freelancer_id,
-                last_message_at: new Date(),
-              },
-            });
-
-        await tx.chatMessage.create({
-          data: {
-            room_id: room.id,
-            sender_id: null,
-            message:
-              "진행자가 요청서를 수락했습니다. 이제 상담과 가격 조율을 시작할 수 있습니다.",
-            message_type: "system",
+        const room = await tx.chatRoom.upsert({
+          where: { booking_id: booking.id },
+          update: { last_message_at: new Date() },
+          create: {
+            booking_id: booking.id,
+            customer_id: booking.customer_id,
+            freelancer_id: booking.freelancer_id,
+            last_message_at: new Date(),
           },
         });
 
-        if (booking.request_id) {
-          await tx.eventRequest.update({
-            where: { id: booking.request_id },
-            data: { status: "consulting" },
-          });
-
-          await tx.recommendation.updateMany({
-            where: {
-              request_id: booking.request_id,
-              freelancer_id: booking.freelancer_id,
-              status: { in: ["consultation_requested", "sent", "viewed", "selected"] },
+        if (acceptedUpdate.count > 0) {
+          await tx.chatMessage.create({
+            data: {
+              room_id: room.id,
+              sender_id: null,
+              message:
+                "진행자가 요청서를 수락했습니다. 이제 상담과 가격 조율을 시작할 수 있습니다.",
+              message_type: "system",
             },
-            data: { status: "selected" },
           });
-
-          const otherRecs = await tx.recommendation.findMany({
-            where: {
-              request_id: booking.request_id,
-              freelancer_id: { not: booking.freelancer_id },
-              status: {
-                in: ["draft", "sent", "viewed", "consultation_requested"],
-              },
-            },
-            include: { freelancer: { select: { user_id: true } } },
-          });
-
-          if (otherRecs.length > 0) {
-            await tx.recommendation.updateMany({
-              where: {
-                request_id: booking.request_id,
-                freelancer_id: { not: booking.freelancer_id },
-                status: {
-                  in: ["draft", "sent", "viewed", "consultation_requested"],
-                },
-              },
-              data: { status: "rejected" },
-            });
-
-            await Promise.all(
-              otherRecs.map((rec) =>
-                createNotification(tx, {
-                  user_id: rec.freelancer.user_id,
-                  type: "recommendation_auto_rejected",
-                  title: "후보 미선택 안내",
-                  message: `"${booking.event_title}" 요청서에서 다른 진행자가 최종 수락되어 자동으로 거절 처리되었습니다.`,
-                  link_url: "/freelancer/requests",
-                }),
-              ),
-            );
-          }
         }
-
-        await createNotification(tx, {
-          user_id: booking.customer_id,
-          type: "booking_accepted",
-          title: "진행 요청 수락",
-          message: `${booking.event_title} 진행 요청이 수락되었습니다. 상담을 시작해 주세요.`,
-          link_url: customerChatLink(room.id),
-        });
 
         return tx.booking.findUniqueOrThrow({
           where: { id: booking.id },
-          include: {
-            customer: { select: { id: true, name: true } },
-            freelancer: {
-              select: {
-                id: true,
-                user_id: true,
-                display_name: true,
-                profile_image_url: true,
-                profile_image_path: true,
-              },
-            },
-            chat_room: true,
-            offers: { orderBy: { created_at: "desc" }, take: 5 },
-            contract: {
-              select: {
-                id: true,
-                status: true,
-                customer_signed_at: true,
-                freelancer_signed_at: true,
-                fully_signed_at: true,
-              },
-            },
-          },
+          include: bookingDetailInclude,
         });
       });
+
+      if (!updated.chat_room?.id) {
+        return errorResponse(
+          res,
+          "SERVER_ERROR",
+          "상담방을 여는 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+          [],
+          500,
+        );
+      }
+
+      await syncAcceptedBookingSideEffects(updated, updated.chat_room.id);
 
       return successResponse(
         res,
