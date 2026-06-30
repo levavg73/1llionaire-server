@@ -347,7 +347,40 @@ type PricingMarketData = {
   avg_price_max: number;
   market_min: number;
   market_max: number;
+  median_price_min: number;
+  median_price_max: number;
   avg_rating: string;
+};
+
+type PricingSimilarFreelancer = {
+  display_name: string | null;
+  categories: string[];
+  career_years: number | null;
+  base_price_min: number | null;
+  base_price_max: number | null;
+  languages: string[];
+  script_writing_available: boolean;
+  rehearsal_available: boolean;
+  travel_available: boolean;
+  avg_rating: number | null;
+  review_count: number;
+};
+
+type PricingGuide = {
+  role: string;
+  career_tier: string;
+  core_base_price: number;
+  duration_multiplier: number;
+  career_multiplier: number;
+  language_surcharge_rate: number;
+  language_surcharge_center: number;
+  script_fee_range: [number, number];
+  rehearsal_fee_range: [number, number];
+  travel_fee_range: [number, number];
+  guide_min: number;
+  guide_center: number;
+  guide_max: number;
+  notes: string[];
 };
 
 const pricingAnalysisResponseSchema = {
@@ -403,6 +436,163 @@ const pricingAnalysisResponseSchema = {
 
 function roundToTenThousand(value: number) {
   return Math.max(0, Math.round(value / 10_000) * 10_000);
+}
+
+function median(values: number[]) {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? Math.round((sorted[middle - 1] + sorted[middle]) / 2)
+    : sorted[middle];
+}
+
+function includesEnglish(language?: string | null) {
+  if (!language) return false;
+  return /영어|english|en\b/i.test(language);
+}
+
+function includesNonKoreanLanguage(language?: string | null) {
+  if (!language) return false;
+  const normalized = language.toLowerCase();
+  if (/한국어|korean|ko\b/.test(normalized) && !includesEnglish(language)) {
+    return false;
+  }
+  return /영어|english|중국어|chinese|일본어|japanese|스페인어|spanish|프랑스어|french|독일어|german|베트남어|vietnamese|태국어|thai/i.test(language);
+}
+
+function getPrimaryRole(categories: string[]) {
+  if (categories.some((category) => category.includes("아나운서"))) return "아나운서";
+  if (categories.some((category) => category.includes("컨퍼런스"))) return "컨퍼런스 MC";
+  if (categories.some((category) => category.includes("기업"))) return "기업행사 MC";
+  if (categories.some((category) => category.includes("쇼호스트"))) return "쇼호스트";
+  if (categories.some((category) => category.includes("라이브커머스"))) return "라이브커머스 진행자";
+  if (categories.some((category) => category.includes("웨딩"))) return "웨딩 사회자";
+  return categories[0] ?? "행사 진행자";
+}
+
+function getFallbackCorePrice(categories: string[]) {
+  const role = getPrimaryRole(categories);
+  if (role.includes("컨퍼런스")) return 700_000;
+  if (role.includes("기업") || role.includes("아나운서")) return 600_000;
+  if (role.includes("쇼호스트") || role.includes("라이브커머스")) return 500_000;
+  if (role.includes("웨딩")) return 350_000;
+  return 500_000;
+}
+
+function getCareerTier(careerYearsMin = 0) {
+  if (careerYearsMin >= 10) return "senior_10_plus";
+  if (careerYearsMin >= 5) return "experienced_5_plus";
+  if (careerYearsMin >= 3) return "mid_3_plus";
+  if (careerYearsMin >= 1) return "junior_1_plus";
+  return "entry_available";
+}
+
+function getCareerMultiplier(careerYearsMin = 0, sampleCount = 0) {
+  // 유사 프리랜서 표본이 충분하면 이미 경력 필터가 반영되어 있으므로 추가 가산을 낮게 잡습니다.
+  const dampener = sampleCount >= 5 ? 0.5 : 1;
+  if (careerYearsMin >= 10) return 1 + 0.35 * dampener;
+  if (careerYearsMin >= 5) return 1 + 0.2 * dampener;
+  if (careerYearsMin >= 3) return 1 + 0.1 * dampener;
+  if (careerYearsMin >= 1) return 1 + 0.05 * dampener;
+  return 1;
+}
+
+function getDurationMultiplier(durationHours = 2) {
+  if (durationHours <= 2.5) return 1;
+  if (durationHours <= 4) return 1.15;
+  if (durationHours <= 6) return 1.3;
+  return 1.5;
+}
+
+function buildPricingGuide(
+  body: PricingRequestBody,
+  marketData: PricingMarketData,
+): PricingGuide {
+  const role = getPrimaryRole(body.categories);
+  const durationHours = body.duration_hours ?? 2;
+  const coreBasis =
+    marketData.median_price_min ||
+    marketData.avg_price_min ||
+    marketData.market_min ||
+    getFallbackCorePrice(body.categories);
+
+  const durationMultiplier = getDurationMultiplier(durationHours);
+  const careerMultiplier = getCareerMultiplier(
+    body.career_years_min ?? 0,
+    marketData.sample_count,
+  );
+  const coreBasePrice = roundToTenThousand(
+    coreBasis * durationMultiplier * careerMultiplier,
+  );
+
+  const requiredLanguage = body.required_language ?? "한국어";
+  const languageSurchargeRate = includesEnglish(requiredLanguage)
+    ? 0.25
+    : includesNonKoreanLanguage(requiredLanguage)
+      ? 0.2
+      : 0;
+  const languageSurchargeCenter = roundToTenThousand(
+    coreBasePrice * languageSurchargeRate,
+  );
+
+  const scriptFeeRange: [number, number] = body.script_required
+    ? [150_000, 300_000]
+    : [0, 0];
+  const rehearsalFeeRange: [number, number] = body.rehearsal_required
+    ? [100_000, 250_000]
+    : [0, 0];
+  const isSeoulArea = /서울|경기|인천|수도권/.test(body.region);
+  const travelFeeRange: [number, number] = body.travel_required
+    ? isSeoulArea
+      ? [0, 100_000]
+      : [100_000, 300_000]
+    : [0, 0];
+
+  const optionMin =
+    languageSurchargeCenter * 0.8 +
+    scriptFeeRange[0] +
+    rehearsalFeeRange[0] +
+    travelFeeRange[0];
+  const optionCenter =
+    languageSurchargeCenter +
+    (scriptFeeRange[0] + scriptFeeRange[1]) / 2 +
+    (rehearsalFeeRange[0] + rehearsalFeeRange[1]) / 2 +
+    (travelFeeRange[0] + travelFeeRange[1]) / 2;
+  const optionMax =
+    languageSurchargeCenter * 1.2 +
+    scriptFeeRange[1] +
+    rehearsalFeeRange[1] +
+    travelFeeRange[1];
+
+  const marketCeiling = marketData.avg_price_max || marketData.market_max || 0;
+  const guideMin = roundToTenThousand(Math.max(coreBasePrice * 0.85 + optionMin, 0));
+  const guideCenter = roundToTenThousand(coreBasePrice + optionCenter);
+  const guideMaxUncapped = roundToTenThousand(coreBasePrice * 1.15 + optionMax);
+  const guideMax = marketCeiling
+    ? roundToTenThousand(Math.max(guideCenter, Math.min(guideMaxUncapped, marketCeiling * 1.15)))
+    : guideMaxUncapped;
+
+  return {
+    role,
+    career_tier: getCareerTier(body.career_years_min ?? 0),
+    core_base_price: coreBasePrice,
+    duration_multiplier: durationMultiplier,
+    career_multiplier: careerMultiplier,
+    language_surcharge_rate: languageSurchargeRate,
+    language_surcharge_center: languageSurchargeCenter,
+    script_fee_range: scriptFeeRange,
+    rehearsal_fee_range: rehearsalFeeRange,
+    travel_fee_range: travelFeeRange,
+    guide_min: guideMin,
+    guide_center: guideCenter,
+    guide_max: guideMax,
+    notes: [
+      "유사 프리랜서의 최소 기준 단가를 본행사 기준으로 사용하고, 최고가 후보는 상한 참고값으로만 사용합니다.",
+      "경력 0년 이상은 신입~초급 후보도 포함하므로 경력 프리미엄을 붙이지 않습니다.",
+      "영어 진행, 대본 작성, 리허설, 출장 조건은 별도 항목으로만 가산합니다.",
+    ],
+  };
 }
 
 function buildBudgetRealism(
@@ -520,57 +710,45 @@ function buildFallbackPricingAnalysis(
   body: PricingRequestBody,
   marketData: PricingMarketData,
 ): PricingAnalysisResult {
-  const marketMinBasis = marketData.avg_price_min || marketData.market_min || 0;
-  const marketMaxBasis =
-    marketData.avg_price_max || marketData.market_max || marketMinBasis;
-  const marketAverage = marketMinBasis
-    ? Math.round((marketMinBasis + marketMaxBasis) / 2)
-    : 0;
-  const budgetAverage =
-    body.budget_min && body.budget_max
-      ? Math.round((body.budget_min + body.budget_max) / 2)
-      : (body.budget_max ?? body.budget_min ?? 0);
-  const baseCenter = marketAverage || budgetAverage || 500_000;
+  const guide = buildPricingGuide(body, marketData);
   const durationHours = body.duration_hours ?? 2;
-  const durationMultiplier = 1 + Math.max(0, durationHours - 2) * 0.15;
-  const recommendedCenter = roundToTenThousand(baseCenter * durationMultiplier);
-  const recommendedMin = roundToTenThousand(
-    Math.max(recommendedCenter * 0.85, body.budget_min ?? 0),
-  );
-  const recommendedMaxBaseline = recommendedCenter * 1.15;
-  const recommendedMax = roundToTenThousand(
-    Math.max(recommendedMin, recommendedMaxBaseline),
-  );
-
   const lineItems: LineItem[] = [
     {
       name: "본행사 진행",
-      description: `${durationHours}시간 기준 핵심 진행 비용`,
-      estimated_price: roundToTenThousand(recommendedCenter * 0.62),
-      reason: "유사 진행자 평균 단가와 행사 시간을 반영",
+      description: `${durationHours}시간 기준 ${guide.role} 진행`,
+      estimated_price: guide.core_base_price,
+      reason: "유사 프리랜서 최소 기준 단가와 시간·경력 조건 반영",
     },
-    {
-      name: "사전 미팅/큐시트 확인",
-      description: "행사 흐름 및 진행 톤 사전 조율",
-      estimated_price: roundToTenThousand(recommendedCenter * 0.12),
-      reason: "행사 완성도 확보를 위한 기본 준비 비용",
-    },
+    ...(guide.language_surcharge_center > 0
+      ? [
+          {
+            name: includesEnglish(body.required_language) ? "외국어 진행 (영어)" : "외국어 진행",
+            description: "외국어 또는 이중언어 진행 가산",
+            estimated_price: guide.language_surcharge_center,
+            reason: "외국어 진행은 본행사 진행비의 20~25% 범위로 가산",
+          },
+        ]
+      : []),
     ...(body.script_required
       ? [
           {
-            name: "대본 검토/작성",
-            description: "행사 대본과 큐시트 사전 준비",
-            estimated_price: roundToTenThousand(recommendedCenter * 0.1),
-            reason: "대본 작성 또는 검토 요청 조건 반영",
+            name: "대본 작성",
+            description: "행사 대본 작성 및 수정",
+            estimated_price: roundToTenThousand(
+              (guide.script_fee_range[0] + guide.script_fee_range[1]) / 2,
+            ),
+            reason: "대본 작성 요청 조건 반영",
           },
         ]
       : []),
     ...(body.rehearsal_required
       ? [
           {
-            name: "리허설 참석",
-            description: "현장 또는 온라인 리허설 참여",
-            estimated_price: roundToTenThousand(recommendedCenter * 0.08),
+            name: "리허설",
+            description: "본행사 전 리허설 참여",
+            estimated_price: roundToTenThousand(
+              (guide.rehearsal_fee_range[0] + guide.rehearsal_fee_range[1]) / 2,
+            ),
             reason: "리허설 필요 조건 반영",
           },
         ]
@@ -578,20 +756,21 @@ function buildFallbackPricingAnalysis(
     ...(body.travel_required
       ? [
           {
-            name: "출장/이동 대응",
+            name: "출장/이동",
             description: "지역 이동 및 현장 도착 리스크",
-            estimated_price: roundToTenThousand(recommendedCenter * 0.06),
+            estimated_price: roundToTenThousand(
+              (guide.travel_fee_range[0] + guide.travel_fee_range[1]) / 2,
+            ),
             reason: "출장 필요 조건 반영",
           },
         ]
       : []),
-    {
-      name: "현장 변수 대응",
-      description: "현장 상황 대응 및 진행 보정",
-      estimated_price: roundToTenThousand(recommendedCenter * 0.12),
-      reason: "현장형 진행 업무의 리스크 비용 반영",
-    },
   ];
+
+  const recommendedCenter = roundToTenThousand(
+    lineItems.reduce((sum, item) => sum + item.estimated_price, 0) ||
+      guide.guide_center,
+  );
 
   return {
     event_summary:
@@ -600,29 +779,28 @@ function buildFallbackPricingAnalysis(
         100,
       ),
     line_items: lineItems,
-    recommended_min: recommendedMin,
-    recommended_max: recommendedMax,
+    recommended_min: guide.guide_min,
+    recommended_max: Math.max(guide.guide_max, recommendedCenter),
     recommended_center: recommendedCenter,
     confidence: marketData.sample_count >= 5 ? "medium" : "low",
     budget_realism: buildBudgetRealism(
       body,
       marketData,
-      recommendedMin,
-      recommendedMax,
+      guide.guide_min,
+      Math.max(guide.guide_max, recommendedCenter),
       recommendedCenter,
     ),
     assumptions: [
-      "플랫폼 내 승인 진행자 단가 데이터를 우선 반영했습니다.",
-      "AI 외부 모델 응답이 불안정할 때 시장 데이터 기반 산식으로 계산했습니다.",
+      "플랫폼 내 유사 진행자의 최소 기준 단가를 중심값으로 사용했습니다.",
+      "고가 후보의 최대 단가는 상한 참고값으로만 반영했습니다.",
     ],
     caution_notes: [
-      "외부 AI 분석 서비스 장애 또는 키 설정 문제로 자동 보정 결과가 사용되었습니다.",
-      "정확한 견적은 대본 작성, 리허설, 출장 범위 확정 후 달라질 수 있습니다.",
+      "정확한 견적은 대본 범위, 리허설 방식, 현장 난이도 확정 후 달라질 수 있습니다.",
+      "영어 진행은 후보 숙련도에 따라 편차가 큽니다.",
     ],
     generated_at: new Date().toISOString(),
   };
 }
-
 router.post(
   "/pricing-analysis",
   requireCustomerOrAdmin,
@@ -630,40 +808,90 @@ router.post(
     try {
       const body = pricingSchema.parse(req.body);
 
-      const stats = await prisma.freelancerProfile.aggregate({
-        where: {
-          status: "approved",
-          categories: { hasSome: body.categories },
-          ...(body.region && body.region !== "전국"
-            ? {
-                OR: [
-                  { region: body.region },
-                  { available_regions: { has: body.region } },
-                ],
-              }
-            : {}),
-          ...(body.career_years_min !== undefined
-            ? { career_years: { gte: body.career_years_min } }
-            : {}),
-        },
-        _avg: { base_price_min: true, base_price_max: true, avg_rating: true },
-        _min: { base_price_min: true },
-        _max: { base_price_max: true },
-        _count: true,
-      });
+      const pricingProfileWhere = {
+        status: "approved" as const,
+        categories: { hasSome: body.categories },
+        ...(body.region && body.region !== "전국"
+          ? {
+              OR: [
+                { region: body.region },
+                { available_regions: { has: body.region } },
+              ],
+            }
+          : {}),
+        ...(body.career_years_min !== undefined
+          ? { career_years: { gte: body.career_years_min } }
+          : {}),
+      };
 
-      const marketData = {
+      const [stats, priceSamples, similarFreelancers] = await Promise.all([
+        prisma.freelancerProfile.aggregate({
+          where: pricingProfileWhere,
+          _avg: { base_price_min: true, base_price_max: true, avg_rating: true },
+          _min: { base_price_min: true },
+          _max: { base_price_max: true },
+          _count: true,
+        }),
+        prisma.freelancerProfile.findMany({
+          where: pricingProfileWhere,
+          select: { base_price_min: true, base_price_max: true },
+          orderBy: [{ base_price_min: "asc" }],
+          take: 100,
+        }),
+        prisma.freelancerProfile.findMany({
+          where: pricingProfileWhere,
+          select: {
+            display_name: true,
+            categories: true,
+            career_years: true,
+            base_price_min: true,
+            base_price_max: true,
+            languages: true,
+            script_writing_available: true,
+            rehearsal_available: true,
+            travel_available: true,
+            avg_rating: true,
+            review_count: true,
+          },
+          orderBy: [{ avg_rating: "desc" }, { review_count: "desc" }],
+          take: 8,
+        }),
+      ]);
+
+      const marketData: PricingMarketData = {
         sample_count: stats._count,
         avg_price_min: Math.round(stats._avg.base_price_min ?? 0),
         avg_price_max: Math.round(stats._avg.base_price_max ?? 0),
         market_min: stats._min.base_price_min ?? 0,
         market_max: stats._max.base_price_max ?? 0,
+        median_price_min: median(
+          priceSamples
+            .map((sample) => sample.base_price_min)
+            .filter((value): value is number => typeof value === "number"),
+        ),
+        median_price_max: median(
+          priceSamples
+            .map((sample) => sample.base_price_max)
+            .filter((value): value is number => typeof value === "number"),
+        ),
         avg_rating: stats._avg.avg_rating?.toFixed(1) ?? "N/A",
       };
+
+      const pricingGuide = buildPricingGuide(body, marketData);
+      const similarFreelancerSummary = (
+        similarFreelancers as PricingSimilarFreelancer[]
+      )
+        .map((freelancer, index) =>
+          `${index + 1}. ${freelancer.display_name ?? "이름 미공개"} / ${freelancer.categories.join(", ") || "분야 미입력"} / 경력 ${freelancer.career_years ?? 0}년 / ${freelancer.base_price_min?.toLocaleString("ko-KR") ?? "미입력"}~${freelancer.base_price_max?.toLocaleString("ko-KR") ?? "미입력"}원 / 언어 ${freelancer.languages.join(", ") || "미입력"}`,
+        )
+        .join("\n");
 
       const systemPrompt = `당신은 한국 행사 진행자(MC/아나운서/쇼호스트) 시장 전문 단가 분석가입니다.
 제공된 시장 데이터와 요청 조건을 바탕으로 단위 항목별 적정 단가를 분석합니다.
 고객 예산에 억지로 맞추지 말고, 행사 시간·요구 경력·지역·분야·플랫폼 시장 단가 기준으로 예산이 현실적인지 판단합니다.
+단, 고가 후보의 최대 단가를 추천 중심값으로 사용하지 말고 유사 프리랜서의 최소/중간 기준 단가를 본행사 진행비의 기준으로 삼으세요.
+추천 총액은 본행사 진행비 + 외국어 진행 + 대본 작성 + 리허설 + 출장/이동 항목의 합계와 일치해야 합니다.
+경력 0년 이상은 신입~초급 후보도 포함한다는 뜻이므로 경력 프리미엄을 붙이지 마세요.
 
 응답은 간결해야 합니다. line_items는 최대 5개, assumptions와 caution_notes는 각각 최대 2개로 제한하세요.
 설명문이나 마크다운 없이 아래 JSON 객체만 반환하세요:
@@ -691,7 +919,8 @@ router.post(
   "generated_at": "<ISO 8601 현재 시각>"
 }
 
-단위 항목 예시 (해당 조건에 맞는 것만 선택): 사전 미팅(20~50만), 대본 검토/작성(20~80만), 리허설(10~50만), 본행사 진행(핵심 비용), 출장/이동(지역별), 외국어 진행(영어 +30%·기타 +20%), 라이브커머스 상품 숙지(10~30만), 현장 변수 대응.`;
+단위 항목 예시 (해당 조건에 맞는 것만 선택): 본행사 진행(핵심 비용), 외국어 진행(영어 +20~30%·기타 +20%), 대본 작성(15~30만), 리허설(10~25만), 출장/이동(지역별), 라이브커머스 상품 숙지(10~30만).
+사전 미팅/현장 변수 대응은 별도 유료 조건이 명확하지 않으면 독립 항목으로 추가하지 마세요.`;
 
       const prompt = `
 ## 행사 조건
@@ -713,9 +942,28 @@ router.post(
 ## 플랫폼 시장 데이터 (${marketData.sample_count}명 기준)
 - 평균 최소 단가: ${marketData.avg_price_min.toLocaleString("ko-KR")}원
 - 평균 최대 단가: ${marketData.avg_price_max.toLocaleString("ko-KR")}원
+- 중앙 최소 단가: ${marketData.median_price_min.toLocaleString("ko-KR")}원
+- 중앙 최대 단가: ${marketData.median_price_max.toLocaleString("ko-KR")}원
 - 시장 최저가: ${marketData.market_min.toLocaleString("ko-KR")}원
 - 시장 최고가: ${marketData.market_max.toLocaleString("ko-KR")}원
 - 평균 평점: ${marketData.avg_rating}점
+
+## 유사 프리랜서 표본
+${similarFreelancerSummary || "유사 표본 없음"}
+
+## 추천 산식 가이드
+- 기준 역할: ${pricingGuide.role}
+- 경력 구간: ${pricingGuide.career_tier}
+- 본행사 기준 진행비: ${pricingGuide.core_base_price.toLocaleString("ko-KR")}원
+- 시간 가중치: ${pricingGuide.duration_multiplier}
+- 경력 가중치: ${pricingGuide.career_multiplier}
+- 외국어 가산율: ${Math.round(pricingGuide.language_surcharge_rate * 100)}%
+- 외국어 가산 중심값: ${pricingGuide.language_surcharge_center.toLocaleString("ko-KR")}원
+- 대본 작성 범위: ${pricingGuide.script_fee_range[0].toLocaleString("ko-KR")}~${pricingGuide.script_fee_range[1].toLocaleString("ko-KR")}원
+- 리허설 범위: ${pricingGuide.rehearsal_fee_range[0].toLocaleString("ko-KR")}~${pricingGuide.rehearsal_fee_range[1].toLocaleString("ko-KR")}원
+- 출장/이동 범위: ${pricingGuide.travel_fee_range[0].toLocaleString("ko-KR")}~${pricingGuide.travel_fee_range[1].toLocaleString("ko-KR")}원
+- 권장 총액 가이드: ${pricingGuide.guide_min.toLocaleString("ko-KR")}~${pricingGuide.guide_max.toLocaleString("ko-KR")}원, 중심 ${pricingGuide.guide_center.toLocaleString("ko-KR")}원
+- 산식 주의: ${pricingGuide.notes.join(" / ")}
 
 위 조건으로 단위 항목별 단가를 분석해 주세요. line_items는 해당 행사에 필요한 항목만 포함하세요.
 고객 예산이 시장가보다 낮으면 추천 단가를 억지로 낮추지 말고 budget_realism.status를 below_market으로 표시하고 이유를 설명하세요.
@@ -725,11 +973,16 @@ router.post(
       let analysis: PricingAnalysisResult | undefined;
       let geminiError: GeminiErrorDetail | null = null;
 
-      // Gemini 호출 전체 시간 예산 (Vercel 함수 한도보다 안전 마진 확보).
-      // 환경변수 AI_GEMINI_BUDGET_MS로 조정 가능 (기본 9초).
-      const TOTAL_GEMINI_BUDGET_MS = Number(
-        process.env.AI_GEMINI_BUDGET_MS ?? 9_000,
+      // Gemini 호출 전체 시간 예산. 단가 분석은 정확성이 중요하므로 기본 25초까지 대기합니다.
+      // AI_GEMINI_BUDGET_MS가 있으면 우선 사용하고, 없으면 GEMINI_MATCHING_TIMEOUT_MS를 공유합니다.
+      const rawGeminiBudgetMs = Number(
+        process.env.AI_GEMINI_BUDGET_MS ??
+          process.env.GEMINI_MATCHING_TIMEOUT_MS ??
+          25_000,
       );
+      const TOTAL_GEMINI_BUDGET_MS = Number.isFinite(rawGeminiBudgetMs)
+        ? Math.min(Math.max(rawGeminiBudgetMs, 5_000), 60_000)
+        : 25_000;
       const MIN_ATTEMPT_MS = 3_000; // 이보다 시간이 적게 남으면 재시도 생략
       const deadline = Date.now() + TOTAL_GEMINI_BUDGET_MS;
 
@@ -819,7 +1072,7 @@ router.post(
 
       return successResponse(res, {
         analysis,
-        market_data: { ...marketData, analysis_source: analysisSource },
+        market_data: { ...marketData, analysis_source: analysisSource, pricing_guide: pricingGuide },
         diagnostic: geminiError
           ? {
               analysis_source: analysisSource,
