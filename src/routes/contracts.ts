@@ -2,7 +2,7 @@
  * 계약서 라우터
  *
  * - POST /api/contracts/:bookingId/generate — 계약서 자동 생성(미서명)
- * - POST /api/contracts/:bookingId/accept   — 계약하기: 계약서 생성 + 현재 사용자 전자서명
+ * - POST /api/contracts/:bookingId/accept   — 기존 호환용: 계약서 생성 + 현재 사용자 전자서명
  * - GET  /api/contracts/:bookingId          — 계약서 조회
  * - PATCH /api/contracts/:bookingId          — 서명 전 계약서 초안 수정
  * - POST /api/contracts/:bookingId/sign     — 계약서 확인 후 현재 당사자 서명
@@ -95,6 +95,10 @@ interface ContractContent {
     commercial_reuse_note: string;
   };
   cancellation_policy: string[];
+  signatures?: {
+    customer?: { signer_name: string; signed_at: string; signature_hash: string };
+    freelancer?: { signer_name: string; signed_at: string; signature_hash: string };
+  };
   clauses: ContractClause[];
 }
 
@@ -129,6 +133,13 @@ const updateContractSchema = z.object({
   cancellation_policy: z.array(z.string().trim().min(1).max(500)).min(1).max(8),
 });
 
+
+
+const signContractSchema = z.object({
+  signer_name: z.string().trim().min(2, "서명자 이름을 2자 이상 입력해 주세요.").max(100, "서명자 이름은 100자 이하로 입력해 주세요."),
+  confirmation_checked: z.boolean().refine((value) => value === true, "전자서명 동의가 필요합니다."),
+});
+
 type UpdateContractInput = z.infer<typeof updateContractSchema>;
 
 function formatNullable(value: string | null | undefined): string | null {
@@ -161,10 +172,10 @@ function parseContractDate(value: string): Date {
   return date;
 }
 
-function buildSignatureHash(userId: string, bookingId: string, timestamp: string): string {
+function buildSignatureHash(userId: string, bookingId: string, timestamp: string, signerName = ""): string {
   return crypto
     .createHash("sha256")
-    .update(`${userId}|${bookingId}|${timestamp}`)
+    .update(`${userId}|${bookingId}|${timestamp}|${signerName.trim()}`)
     .digest("hex");
 }
 
@@ -496,7 +507,8 @@ async function signContractForParty(
   booking: NonNullable<Awaited<ReturnType<typeof getBookingWithParties>>>,
   contract: NonNullable<NonNullable<Awaited<ReturnType<typeof getBookingWithParties>>>["contract"]>,
   party: ContractParty,
-  userId: string
+  userId: string,
+  signerName: string
 ) {
   if (contract.status === "voided") {
     throw Object.assign(new Error("무효화된 계약서입니다."), { statusCode: 409, code: "CONFLICT" });
@@ -515,9 +527,22 @@ async function signContractForParty(
 
   const timestamp = new Date();
   const timestampIso = timestamp.toISOString();
-  const signatureHash = buildSignatureHash(userId, booking.id, timestampIso);
+  const normalizedSignerName = signerName.trim();
+  const signatureHash = buildSignatureHash(userId, booking.id, timestampIso, normalizedSignerName);
   const otherAlreadySigned = isCustomer ? !!contract.freelancer_signed_at : !!contract.customer_signed_at;
   const newStatus = otherAlreadySigned ? "fully_signed" : isCustomer ? "pending_freelancer" : "pending_customer";
+  const content = (contract.content_json ?? {}) as unknown as ContractContent;
+  const updatedContent: ContractContent = {
+    ...content,
+    signatures: {
+      ...(content.signatures ?? {}),
+      [isCustomer ? "customer" : "freelancer"]: {
+        signer_name: normalizedSignerName,
+        signed_at: timestampIso,
+        signature_hash: signatureHash,
+      },
+    },
+  };
 
   const updatedContract = await tx.contract.update({
     where: { id: contract.id },
@@ -531,6 +556,7 @@ async function signContractForParty(
             freelancer_signed_at: timestamp,
             freelancer_signature_hash: signatureHash,
           }),
+      content_json: updatedContent as unknown as Prisma.InputJsonValue,
       status: newStatus,
       ...(newStatus === "fully_signed" ? { fully_signed_at: timestamp } : {}),
     },
@@ -549,7 +575,7 @@ async function signContractForParty(
         data: {
           room_id: booking.chat_room.id,
           sender_id: null,
-          message: "양측이 계약하기를 완료했습니다. 자동 계약서가 생성되었고, 결제 단계로 전환되었습니다.",
+          message: "양측 전자서명이 완료되었습니다. 계약이 성사되어 결제 단계로 전환되었습니다.",
           message_type: "system",
         },
       });
@@ -738,9 +764,14 @@ router.post("/:bookingId/accept", async (req: AuthRequest, res: Response, next: 
       );
     }
 
+    const signerName =
+      party === "customer"
+        ? booking.customer.name ?? "고객"
+        : booking.freelancer.display_name ?? booking.freelancer.user.name;
+
     const updated = await prisma.$transaction(async (tx) => {
       const contract = await createContractIfMissing(tx, booking);
-      return signContractForParty(tx, booking, contract, party, userId);
+      return signContractForParty(tx, booking, contract, party, userId, signerName);
     });
 
     const message =
@@ -782,6 +813,11 @@ router.post("/:bookingId/sign", async (req: AuthRequest, res: Response, next: Ne
       return errorResponse(res, "FORBIDDEN", "관리자는 계약 당사자 서명을 대신할 수 없습니다.", [], 403);
     }
 
+    const parsed = signContractSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return errorResponse(res, "VALIDATION_ERROR", "서명 정보를 확인해 주세요.", parsed.error.issues, 400);
+    }
+
     const loaded = await loadAuthorizedBooking(req, res);
     if (!loaded) return;
     const { booking, party } = loaded;
@@ -791,7 +827,7 @@ router.post("/:bookingId/sign", async (req: AuthRequest, res: Response, next: Ne
       return errorResponse(res, "NOT_FOUND", "계약서가 없습니다.", [], 404);
     }
 
-    const updated = await prisma.$transaction((tx) => signContractForParty(tx, booking, contract, party, userId));
+    const updated = await prisma.$transaction((tx) => signContractForParty(tx, booking, contract, party, userId, parsed.data.signer_name));
 
     const message =
       updated.status === "fully_signed"
@@ -817,11 +853,13 @@ function contractHtml(c: ContractContent, contract: NonNullable<Awaited<ReturnTy
     .join("\n");
   const cancellationHtml = c.cancellation_policy.map((item) => `<li>${escapeHtml(item)}</li>`).join("\n");
 
+  const customerSignature = c.signatures?.customer;
+  const freelancerSignature = c.signatures?.freelancer;
   const customerSignatureHtml = contract?.customer_signed_at
-    ? `<p class="signed">서명 완료</p><p class="sig-label">${formatKoDateTime(contract.customer_signed_at)}</p><p class="sig-hash">Hash: ${escapeHtml(contract.customer_signature_hash)}</p>`
+    ? `<p class="signed">서명 완료</p><p class="sig-label">서명자: ${escapeHtml(customerSignature?.signer_name || customerManager)}</p><p class="sig-label">${formatKoDateTime(contract.customer_signed_at)}</p><p class="sig-hash">Hash: ${escapeHtml(contract.customer_signature_hash)}</p>`
     : "<p class='pending'>서명 대기 중</p>";
   const freelancerSignatureHtml = contract?.freelancer_signed_at
-    ? `<p class="signed">서명 완료</p><p class="sig-label">${formatKoDateTime(contract.freelancer_signed_at)}</p><p class="sig-hash">Hash: ${escapeHtml(contract.freelancer_signature_hash)}</p>`
+    ? `<p class="signed">서명 완료</p><p class="sig-label">서명자: ${escapeHtml(freelancerSignature?.signer_name || freelancerDisplay)}</p><p class="sig-label">${formatKoDateTime(contract.freelancer_signed_at)}</p><p class="sig-hash">Hash: ${escapeHtml(contract.freelancer_signature_hash)}</p>`
     : "<p class='pending'>서명 대기 중</p>";
 
   return `<!DOCTYPE html>
@@ -859,7 +897,7 @@ function contractHtml(c: ContractContent, contract: NonNullable<Awaited<ReturnTy
 <h1>${escapeHtml(c.contract_title)}</h1>
 <p class="meta">계약 생성일: ${formatKoDate(c.generated_at)} · VOIT 전자계약 자동 생성 문서</p>
 
-<div class="notice">본 계약서는 고객과 진행자가 각각 ‘계약하기’를 완료하면 자동으로 성립되며, 양측 전자서명 시각과 해시값이 기록됩니다.</div>
+<div class="notice">본 계약서는 양측이 계약 조건을 확인한 뒤 별도 전자서명을 완료하면 성립되며, 서명자명·서명 시각·해시값이 기록됩니다.</div>
 
 <h2>1. 계약의 기본 정보</h2>
 <table>
@@ -966,8 +1004,8 @@ function contractTextLines(c: ContractContent, contract: NonNullable<Awaited<Ret
   c.cancellation_policy.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
   lines.push("");
   lines.push("전자서명");
-  lines.push(`발주자(갑): ${contract?.customer_signed_at ? `서명 완료 ${new Date(contract.customer_signed_at).toLocaleString("ko-KR")}` : "서명 대기 중"}`);
-  lines.push(`출연자(을): ${contract?.freelancer_signed_at ? `서명 완료 ${new Date(contract.freelancer_signed_at).toLocaleString("ko-KR")}` : "서명 대기 중"}`);
+  lines.push(`발주자(갑): ${contract?.customer_signed_at ? `서명 완료 ${new Date(contract.customer_signed_at).toLocaleString("ko-KR")} / 서명자: ${c.signatures?.customer?.signer_name || c.customer.manager_name || c.customer.name}` : "서명 대기 중"}`);
+  lines.push(`출연자(을): ${contract?.freelancer_signed_at ? `서명 완료 ${new Date(contract.freelancer_signed_at).toLocaleString("ko-KR")} / 서명자: ${c.signatures?.freelancer?.signer_name || c.freelancer.display_name || c.freelancer.legal_name}` : "서명 대기 중"}`);
   if (contract?.customer_signature_hash) lines.push(`갑 서명 해시: ${contract.customer_signature_hash}`);
   if (contract?.freelancer_signature_hash) lines.push(`을 서명 해시: ${contract.freelancer_signature_hash}`);
 
