@@ -26,6 +26,12 @@ import {
   notifyEscrowReleased,
 } from "../utils/notifications";
 import { canTransitionRequest } from "../utils/stateTransitions";
+import {
+  canConfirmPaymentAfterContract,
+  canRefundPaidBooking,
+  canReleaseEscrow,
+  withTransactionDisplayStatus,
+} from "../utils/bookingLifecycle";
 
 const router = Router();
 
@@ -106,7 +112,7 @@ router.post(
         return errorResponse(
           res,
           "CONFLICT",
-          "프리랜서 수락 또는 가격 확정 후 결제할 수 있습니다.",
+          "금액 합의와 계약서 생성 이후 결제할 수 있습니다.",
           [],
           409
         );
@@ -192,7 +198,13 @@ router.post(
 
       const payment = await prisma.payment.findUnique({
         where: { order_id: body.order_id },
-        include: { booking: true },
+        include: {
+          booking: {
+            include: {
+              contract: { select: { status: true } },
+            },
+          },
+        },
       });
 
       if (!payment) {
@@ -206,6 +218,16 @@ router.post(
       }
       if (payment.status === "DONE") {
         return errorResponse(res, "CONFLICT", "이미 승인된 결제입니다.", [], 409);
+      }
+
+      if (!canConfirmPaymentAfterContract(payment.booking)) {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "양측 전자서명이 완료된 계약서가 있고 아직 정산되지 않은 예약만 결제 승인할 수 있습니다.",
+          [],
+          409
+        );
       }
 
       let tossData: TossPaymentResponse;
@@ -308,6 +330,7 @@ router.post(
         where: { id: req.params.bookingId },
         include: {
           freelancer: { select: { user_id: true } },
+          contract: { select: { status: true } },
         },
       });
 
@@ -315,21 +338,11 @@ router.post(
         return errorResponse(res, "NOT_FOUND", "예약을 찾을 수 없습니다.", [], 404);
       }
 
-      if (booking.escrow_status !== "held") {
+      if (!canReleaseEscrow(booking)) {
         return errorResponse(
           res,
           "CONFLICT",
-          "에스크로 보관 중인 예약만 정산할 수 있습니다.",
-          [],
-          409
-        );
-      }
-
-      if (booking.booking_status !== "completed") {
-        return errorResponse(
-          res,
-          "CONFLICT",
-          "행사 완료 처리 후 정산할 수 있습니다.",
+          "양측 전자서명, 결제 완료, 행사 완료 확인이 끝나고 에스크로 보관 중인 예약만 정산할 수 있습니다.",
           [],
           409
         );
@@ -354,7 +367,7 @@ router.post(
         return released;
       });
 
-      return successResponse(res, updated, "에스크로 정산이 완료되었습니다.");
+      return successResponse(res, withTransactionDisplayStatus(updated), "에스크로 정산이 완료되었습니다.");
     } catch (err) {
       next(err);
     }
@@ -380,7 +393,14 @@ router.post(
 
       const payment = await prisma.payment.findUnique({
         where: { booking_id: body.booking_id },
-        include: { booking: true },
+        include: {
+          booking: {
+            include: {
+              contract: { select: { id: true, status: true } },
+              request: true,
+            },
+          },
+        },
       });
 
       if (!payment || payment.status !== "DONE") {
@@ -389,6 +409,26 @@ router.post(
 
       if (userType === "customer" && payment.booking.customer_id !== userId) {
         return errorResponse(res, "FORBIDDEN", "접근 권한이 없습니다.", [], 403);
+      }
+
+      if (body.cancel_amount && body.cancel_amount < payment.amount) {
+        return errorResponse(
+          res,
+          "VALIDATION_ERROR",
+          "현재 상태 모델에서는 부분 환불을 지원하지 않습니다. 전체 환불로 처리해 주세요.",
+          [],
+          400
+        );
+      }
+
+      if (!canRefundPaidBooking(payment.booking)) {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "결제 완료 후 에스크로 보관 중이며 아직 정산되지 않은 예약만 환불할 수 있습니다.",
+          [],
+          409
+        );
       }
 
       if (!payment.payment_key) {
@@ -409,31 +449,52 @@ router.post(
         return errorResponse(res, "SERVER_ERROR", errData?.message ?? "결제 취소에 실패했습니다.", [], 500);
       }
 
-      const isFullCancel = !body.cancel_amount || body.cancel_amount >= payment.amount;
+      const updated = await prisma.$transaction(
+        async (tx: Prisma.TransactionClient) => {
+          await tx.payment.update({
+            where: { booking_id: body.booking_id },
+            data: {
+              status: "CANCELED",
+              raw_response: toPrismaJson(tossData),
+            },
+          });
 
-      await prisma.$transaction([
-        prisma.payment.update({
-          where: { booking_id: body.booking_id },
-          data: {
-            status: isFullCancel ? "CANCELED" : "PARTIAL_CANCELED",
-            raw_response: toPrismaJson(tossData),
-          },
-        }),
-        prisma.booking.update({
-          where: { id: body.booking_id },
-          data: {
-            payment_status: "refunded",
-            escrow_status: "refunded",
-            ...(isFullCancel && { booking_status: "canceled" }),
-            cancel_reason: body.cancel_reason,
-          },
-        }),
-      ]);
+          const refunded = await tx.booking.update({
+            where: { id: body.booking_id },
+            data: {
+              payment_status: "refunded",
+              escrow_status: "refunded",
+              booking_status: "canceled",
+              settlement_status: "held",
+              cancel_reason: body.cancel_reason,
+            },
+          });
+
+          if (payment.booking.contract) {
+            await tx.contract.update({
+              where: { id: payment.booking.contract.id },
+              data: { status: "voided" },
+            });
+          }
+
+          if (
+            payment.booking.request &&
+            canTransitionRequest(payment.booking.request.status, "canceled")
+          ) {
+            await tx.eventRequest.update({
+              where: { id: payment.booking.request.id },
+              data: { status: "canceled" },
+            });
+          }
+
+          return refunded;
+        }
+      );
 
       return successResponse(
         res,
-        { status: isFullCancel ? "CANCELED" : "PARTIAL_CANCELED" },
-        "결제가 취소되었습니다."
+        withTransactionDisplayStatus(updated),
+        "결제가 취소되고 예약이 환불 취소 상태로 변경되었습니다."
       );
     } catch (err) {
       next(err);
@@ -463,9 +524,11 @@ router.get(
               freelancer: { select: { user_id: true } },
               booking_status: true,
               payment_status: true,
+              settlement_status: true,
               escrow_status: true,
               escrow_held_at: true,
               escrow_released_at: true,
+              contract: { select: { status: true } },
             },
           },
         },
@@ -485,7 +548,10 @@ router.get(
 
       const { freelancer: _freelancer, ...safeBooking } = payment.booking;
       const { raw_response: _raw, payment_key: _paymentKey, ...safePayment } = payment;
-      return successResponse(res, { ...safePayment, booking: safeBooking });
+      return successResponse(res, {
+        ...safePayment,
+        booking: withTransactionDisplayStatus(safeBooking),
+      });
     } catch (err) {
       next(err);
     }

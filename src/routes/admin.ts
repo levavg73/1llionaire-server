@@ -12,6 +12,11 @@ import {
   parsePagination,
 } from "../utils/response";
 import { canTransitionBooking, canTransitionRequest } from "../utils/stateTransitions";
+import {
+  canDirectCancelBooking,
+  canRequestOrApproveCompletion,
+  withTransactionDisplayStatus,
+} from "../utils/bookingLifecycle";
 import { attachSignedProfileImageUrl, attachSignedProfileImageUrls } from "../utils/profileImages";
 
 const router = Router();
@@ -403,12 +408,19 @@ router.get("/bookings", async (req: AuthRequest, res: Response, next: NextFuncti
         include: {
           customer: { select: { id: true, name: true, email: true } },
           freelancer: { select: { id: true, display_name: true } },
+          contract: { select: { status: true } },
         },
       }),
       prisma.booking.count({ where }),
     ]);
 
-    return listResponse(res, items, total, page, limit);
+    return listResponse(
+      res,
+      items.map((item) => withTransactionDisplayStatus(item)),
+      total,
+      page,
+      limit,
+    );
   } catch (err) {
     next(err);
   }
@@ -426,7 +438,10 @@ router.patch("/bookings/:id", async (req: AuthRequest, res: Response, next: Next
 
     const booking = await prisma.booking.findUnique({
       where: { id: req.params.id },
-      include: { request: true },
+      include: {
+        request: true,
+        contract: { select: { status: true } },
+      },
     });
 
     if (!booking) {
@@ -443,8 +458,51 @@ router.patch("/bookings/:id", async (req: AuthRequest, res: Response, next: Next
       );
     }
 
+    if (data.payment_status && ["fully_paid", "refunded"].includes(data.payment_status)) {
+      return errorResponse(
+        res,
+        "CONFLICT",
+        "결제 완료/환불 완료 상태는 관리자 수동 변경이 아니라 결제 승인 또는 환불 API를 통해 변경해야 합니다.",
+        [],
+        409,
+      );
+    }
+
+    if (data.settlement_status === "completed") {
+      return errorResponse(
+        res,
+        "CONFLICT",
+        "정산 완료는 관리자 수동 변경이 아니라 에스크로 정산 릴리즈 API를 통해 처리해야 합니다.",
+        [],
+        409,
+      );
+    }
+
+    if (data.booking_status === "canceled" && !canDirectCancelBooking(booking)) {
+      return errorResponse(
+        res,
+        "CONFLICT",
+        "계약 체결 또는 결제 이후에는 관리자 수동 상태 변경으로 취소할 수 없습니다. 결제 환불 절차를 이용해 주세요.",
+        [],
+        409
+      );
+    }
+
+    if (data.booking_status === "completed" && !canRequestOrApproveCompletion(booking)) {
+      return errorResponse(
+        res,
+        "CONFLICT",
+        "양측 전자서명, 결제 완료, 에스크로 보관이 확인된 예약만 행사 완료 처리할 수 있습니다.",
+        [],
+        409
+      );
+    }
+
     const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const updateData: Prisma.BookingUpdateInput = { ...data };
+      if (data.booking_status === "completed") {
+        updateData.settlement_status = "scheduled";
+      }
       const changed = await tx.booking.update({
         where: { id: req.params.id },
         data: updateData,
@@ -483,7 +541,7 @@ router.patch("/bookings/:id", async (req: AuthRequest, res: Response, next: Next
       });
     }
 
-    return successResponse(res, updated, "예약 상태가 변경되었습니다.");
+    return successResponse(res, withTransactionDisplayStatus(updated), "예약 상태가 변경되었습니다.");
   } catch (err) {
     next(err);
   }
@@ -514,7 +572,9 @@ router.get("/payments", async (req: AuthRequest, res: Response, next: NextFuncti
           platform_fee: true,
           payment_status: true,
           booking_status: true,
+          settlement_status: true,
           escrow_status: true,
+          contract: { select: { status: true } },
           customer: { select: { name: true, email: true } },
           freelancer: { select: { display_name: true } },
         },
@@ -522,7 +582,13 @@ router.get("/payments", async (req: AuthRequest, res: Response, next: NextFuncti
       prisma.booking.count({ where }),
     ]);
 
-    return listResponse(res, items, total, page, limit);
+    return listResponse(
+      res,
+      items.map((item) => withTransactionDisplayStatus(item)),
+      total,
+      page,
+      limit,
+    );
   } catch (err) {
     next(err);
   }
@@ -535,12 +601,22 @@ router.patch("/payments/:id", async (req: AuthRequest, res: Response, next: Next
     });
     const { payment_status } = schema.parse(req.body);
 
+    if (["fully_paid", "refunded"].includes(payment_status)) {
+      return errorResponse(
+        res,
+        "CONFLICT",
+        "결제 완료/환불 완료 상태는 관리자 수동 변경이 아니라 결제 승인 또는 환불 API를 통해 변경해야 합니다.",
+        [],
+        409,
+      );
+    }
+
     const updated = await prisma.booking.update({
       where: { id: req.params.id },
       data: { payment_status },
     });
 
-    return successResponse(res, updated, "결제 상태가 변경되었습니다.");
+    return successResponse(res, withTransactionDisplayStatus(updated), "결제 상태가 변경되었습니다.");
   } catch (err) {
     next(err);
   }
@@ -570,15 +646,24 @@ router.get("/settlements", async (req: AuthRequest, res: Response, next: NextFun
           final_price: true,
           platform_fee: true,
           freelancer_amount: true,
+          booking_status: true,
           payment_status: true,
           settlement_status: true,
+          escrow_status: true,
+          contract: { select: { status: true } },
           freelancer: { select: { id: true, display_name: true } },
         },
       }),
       prisma.booking.count({ where }),
     ]);
 
-    return listResponse(res, items, total, page, limit);
+    return listResponse(
+      res,
+      items.map((item) => withTransactionDisplayStatus(item)),
+      total,
+      page,
+      limit,
+    );
   } catch (err) {
     next(err);
   }
@@ -591,12 +676,22 @@ router.patch("/settlements/:id", async (req: AuthRequest, res: Response, next: N
     });
     const { settlement_status } = schema.parse(req.body);
 
+    if (settlement_status === "completed") {
+      return errorResponse(
+        res,
+        "CONFLICT",
+        "정산 완료는 관리자 수동 변경이 아니라 에스크로 정산 릴리즈 API를 통해 처리해야 합니다.",
+        [],
+        409,
+      );
+    }
+
     const updated = await prisma.booking.update({
       where: { id: req.params.id },
       data: { settlement_status },
     });
 
-    return successResponse(res, updated, "정산 상태가 변경되었습니다.");
+    return successResponse(res, withTransactionDisplayStatus(updated), "정산 상태가 변경되었습니다.");
   } catch (err) {
     next(err);
   }

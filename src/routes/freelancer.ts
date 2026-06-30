@@ -36,6 +36,7 @@ import {
   getSupabaseSignatureVoiceAdminClient,
   isOwnSignatureVoicePath,
 } from "../utils/signatureVoice";
+import { withTransactionDisplayStatus } from "../utils/bookingLifecycle";
 
 const router = Router();
 
@@ -1041,6 +1042,8 @@ router.get(
                     id: true,
                     booking_status: true,
                     payment_status: true,
+                    settlement_status: true,
+                    escrow_status: true,
                     final_price: true,
                     chat_room: { select: { id: true } },
                     contract: {
@@ -1061,7 +1064,19 @@ router.get(
         prisma.recommendation.count({ where }),
       ]);
 
-      return listResponse(res, items, total, page, limit);
+      const responseItems = items.map((item) => ({
+        ...item,
+        request: item.request
+          ? {
+              ...item.request,
+              bookings: item.request.bookings.map((booking) =>
+                withTransactionDisplayStatus(booking),
+              ),
+            }
+          : item.request,
+      }));
+
+      return listResponse(res, responseItems, total, page, limit);
     } catch (err) {
       next(err);
     }
@@ -1185,12 +1200,20 @@ router.get(
             booking_status: true,
             payment_status: true,
             settlement_status: true,
+            escrow_status: true,
+            contract: { select: { status: true } },
           },
         }),
         prisma.booking.count({ where }),
       ]);
 
-      return listResponse(res, items, total, page, limit);
+      return listResponse(
+        res,
+        items.map((item) => withTransactionDisplayStatus(item)),
+        total,
+        page,
+        limit,
+      );
     } catch (err) {
       next(err);
     }

@@ -5,6 +5,7 @@ import { authenticate } from "../middleware/auth";
 import { AuthRequest } from "../types";
 import { successResponse, errorResponse, listResponse, parsePagination } from "../utils/response";
 import { createNotification } from "../utils/notifications";
+import { withTransactionDisplayStatus } from "../utils/bookingLifecycle";
 
 const router = Router();
 
@@ -29,6 +30,9 @@ async function getParticipantRoom(roomId: string, userId: string, userType: stri
           event_date: true,
           booking_status: true,
           payment_status: true,
+          settlement_status: true,
+          escrow_status: true,
+          contract: { select: { status: true } },
           final_price: true,
         },
       },
@@ -43,7 +47,12 @@ async function getParticipantRoom(roomId: string, userId: string, userType: stri
 
   if (!isCustomer && !isFreelancer && !isAdmin) return null;
 
-  return room;
+  return room.booking
+    ? {
+        ...room,
+        booking: withTransactionDisplayStatus(room.booking),
+      }
+    : room;
 }
 
 function getOtherParticipantUserId(room: { customer_id: string; freelancer: { user_id: string } }, userId: string) {
@@ -86,6 +95,9 @@ router.get("/rooms", async (req: AuthRequest, res: Response, next: NextFunction)
               event_date: true,
               booking_status: true,
               payment_status: true,
+              settlement_status: true,
+              escrow_status: true,
+              contract: { select: { status: true } },
               final_price: true,
             },
           },
@@ -100,7 +112,16 @@ router.get("/rooms", async (req: AuthRequest, res: Response, next: NextFunction)
       prisma.chatRoom.count({ where }),
     ]);
 
-    return listResponse(res, items, total, page, limit);
+    const responseItems = items.map((room) =>
+      room.booking
+        ? {
+            ...room,
+            booking: withTransactionDisplayStatus(room.booking),
+          }
+        : room,
+    );
+
+    return listResponse(res, responseItems, total, page, limit);
   } catch (err) {
     next(err);
   }

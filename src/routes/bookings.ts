@@ -20,6 +20,11 @@ import {
   canTransitionRequest,
 } from "../utils/stateTransitions";
 import {
+  canDirectCancelBooking,
+  canRequestOrApproveCompletion,
+  withTransactionDisplayStatus,
+} from "../utils/bookingLifecycle";
+import {
   createNotification,
   notifyReviewRequested,
 } from "../utils/notifications";
@@ -118,7 +123,7 @@ async function createPendingContractForBooking(
       "천재지변, 불가항력으로 인한 행사 취소 시 위약금은 상호 협의합니다.",
       "행사 당일 녹화·촬영은 사전 서면 동의 없이 상업적으로 사용할 수 없습니다.",
       "결제 금액은 PG sandbox 결제 및 플랫폼 상태값으로 에스크로 보관 흐름을 검증하며, 실서비스에서는 PG사의 구매안전/에스크로 정책을 따릅니다.",
-      "양측 전자서명이 완료된 계약서는 직접 수정할 수 없으며, 변경이 필요한 경우 기존 예약을 취소하고 새 조건으로 다시 진행합니다.",
+      "양측 전자서명이 완료된 계약서는 직접 수정할 수 없으며, 변경이나 취소가 필요한 경우 환불/계약 무효화 절차를 통해 처리합니다.",
       "분쟁 발생 시 VOIT 운영팀의 중재를 먼저 요청합니다.",
     ],
   };
@@ -187,16 +192,23 @@ async function getBookingForUser(bookingId: string, user: AuthPayload) {
 
 async function serializeBooking<
   T extends {
+    booking_status: string;
+    payment_status: string;
+    settlement_status?: string | null;
+    escrow_status?: string | null;
+    contract?: { status?: string | null } | null;
     freelancer?: {
       profile_image_path?: string | null;
       profile_image_url?: string | null;
     } | null;
   },
 >(booking: T) {
-  if (!booking.freelancer) return booking;
+  const bookingWithStatus = withTransactionDisplayStatus(booking);
+
+  if (!booking.freelancer) return bookingWithStatus;
 
   return {
-    ...booking,
+    ...bookingWithStatus,
     freelancer: await attachSignedProfileImageUrl(booking.freelancer),
   };
 }
@@ -893,7 +905,7 @@ router.post(
         return errorResponse(
           res,
           "CONFLICT",
-          "양측 서명이 완료된 계약서는 수정할 수 없습니다. 변경이 필요하면 기존 예약을 취소하고 새 요청을 진행해 주세요.",
+          "양측 서명이 완료된 계약서는 수정할 수 없습니다. 변경이나 취소가 필요하면 환불/계약 무효화 절차를 진행해 주세요.",
           [],
           409,
         );
@@ -987,7 +999,7 @@ router.patch(
         return errorResponse(
           res,
           "CONFLICT",
-          "양측 서명이 완료된 계약서는 수정할 수 없습니다. 변경이 필요하면 기존 예약을 취소하고 새 요청을 진행해 주세요.",
+          "양측 서명이 완료된 계약서는 수정할 수 없습니다. 변경이나 취소가 필요하면 환불/계약 무효화 절차를 진행해 주세요.",
           [],
           409,
         );
@@ -1110,7 +1122,7 @@ router.patch(
         return errorResponse(
           res,
           "CONFLICT",
-          "양측 서명이 완료된 계약서는 수정할 수 없습니다. 변경이 필요하면 기존 예약을 취소하고 새 요청을 진행해 주세요.",
+          "양측 서명이 완료된 계약서는 수정할 수 없습니다. 변경이나 취소가 필요하면 환불/계약 무효화 절차를 진행해 주세요.",
           [],
           409,
         );
@@ -1200,6 +1212,10 @@ router.patch(
 
       const booking = await prisma.booking.findUnique({
         where: { id: req.params.id },
+        include: {
+          chat_room: true,
+          contract: { select: { id: true, status: true } },
+        },
       });
 
       if (!booking) {
@@ -1232,15 +1248,86 @@ router.patch(
         );
       }
 
-      const updated = await prisma.booking.update({
-        where: { id: req.params.id },
-        data: {
-          booking_status: "canceled",
-          cancel_reason: cancel_reason || null,
-        },
-      });
+      if (!canDirectCancelBooking(booking)) {
+        return errorResponse(
+          res,
+          "CONFLICT",
+          "계약 체결 또는 결제 이후에는 일반 취소가 불가합니다. 결제가 완료된 건은 환불 절차를 이용해 주세요.",
+          [],
+          409,
+        );
+      }
 
-      return successResponse(res, updated, "예약이 취소되었습니다.");
+      const updated = await prisma.$transaction(
+        async (tx: Prisma.TransactionClient) => {
+          const canceled = await tx.booking.update({
+            where: { id: req.params.id },
+            data: {
+              booking_status: "canceled",
+              cancel_reason: cancel_reason || null,
+            },
+            include: {
+              customer: { select: { id: true, name: true } },
+              freelancer: {
+                select: {
+                  id: true,
+                  user_id: true,
+                  display_name: true,
+                  profile_image_url: true,
+                  profile_image_path: true,
+                },
+              },
+              chat_room: true,
+              offers: { orderBy: { created_at: "desc" }, take: 3 },
+              contract: {
+                select: {
+                  id: true,
+                  status: true,
+                  customer_signed_at: true,
+                  freelancer_signed_at: true,
+                  fully_signed_at: true,
+                },
+              },
+            },
+          });
+
+          await tx.bookingOffer.updateMany({
+            where: { booking_id: booking.id, status: "pending" },
+            data: { status: "cancelled" },
+          });
+
+          if (booking.contract) {
+            await tx.contract.update({
+              where: { id: booking.contract.id },
+              data: { status: "voided" },
+            });
+          }
+
+          if (booking.chat_room?.id) {
+            await tx.chatMessage.create({
+              data: {
+                room_id: booking.chat_room.id,
+                sender_id: null,
+                message: "계약 체결 전 단계에서 예약이 취소되었습니다.",
+                message_type: "system",
+              },
+            });
+
+            await tx.chatRoom.update({
+              where: { id: booking.chat_room.id },
+              data: { last_message_at: new Date() },
+            });
+          }
+
+          return canceled;
+        },
+      );
+
+      return successResponse(
+        res,
+        await serializeBooking(updated),
+        "예약이 취소되었습니다.",
+      );
     } catch (err) {
       next(err);
     }
@@ -1284,21 +1371,14 @@ router.patch(
         );
       }
 
-      if (booking.payment_status !== "fully_paid") {
+      if (
+        booking.booking_status !== BookingStatus.confirmed ||
+        !canRequestOrApproveCompletion(booking)
+      ) {
         return errorResponse(
           res,
           "CONFLICT",
-          "결제 완료 후 완료 요청할 수 있습니다.",
-          [],
-          409,
-        );
-      }
-
-      if (booking.booking_status !== BookingStatus.confirmed) {
-        return errorResponse(
-          res,
-          "CONFLICT",
-          "예약 확정 상태에서만 완료 요청할 수 있습니다.",
+          "양측 전자서명과 결제 완료 후 에스크로 보관 중인 예약만 완료 요청할 수 있습니다.",
           [],
           409,
         );
@@ -1308,7 +1388,10 @@ router.patch(
         async (tx: Prisma.TransactionClient) => {
           const result = await tx.booking.update({
             where: { id: req.params.id },
-            data: { booking_status: BOOKING_STATUS_COMPLETION_REQUESTED },
+            data: {
+              booking_status: BOOKING_STATUS_COMPLETION_REQUESTED,
+              completion_requested_at: new Date(),
+            },
           });
 
           await createNotification(tx, {
@@ -1325,7 +1408,7 @@ router.patch(
 
       return successResponse(
         res,
-        updated,
+        withTransactionDisplayStatus({ ...updated, contract: booking.contract }),
         "행사 완료 요청이 전달되었습니다. 고객이 확인하면 정산이 진행됩니다.",
       );
     } catch (err) {
@@ -1343,7 +1426,10 @@ router.patch(
     try {
       const booking = await prisma.booking.findFirst({
         where: { id: req.params.id, customer_id: req.user!.userId },
-        include: { freelancer: { select: { user_id: true } } },
+        include: {
+          freelancer: { select: { user_id: true } },
+          contract: { select: { status: true } },
+        },
       });
 
       if (!booking) {
@@ -1356,24 +1442,11 @@ router.patch(
         );
       }
 
-      if (
-        booking.booking_status !== BookingStatus.confirmed &&
-        String(booking.booking_status) !== "completion_requested"
-      ) {
+      if (!canRequestOrApproveCompletion(booking)) {
         return errorResponse(
           res,
           "CONFLICT",
-          "예약 확정 또는 완료 요청 상태에서만 행사 완료를 확인할 수 있습니다.",
-          [],
-          409,
-        );
-      }
-
-      if (booking.payment_status !== "fully_paid") {
-        return errorResponse(
-          res,
-          "CONFLICT",
-          "결제 완료 후 행사 완료를 확인할 수 있습니다.",
+          "양측 전자서명과 결제 완료 후 에스크로 보관 중인 예약만 행사 완료를 확인할 수 있습니다.",
           [],
           409,
         );
@@ -1383,7 +1456,10 @@ router.patch(
         async (tx: Prisma.TransactionClient) => {
           const completed = await tx.booking.update({
             where: { id: req.params.id },
-            data: { booking_status: BookingStatus.completed },
+            data: {
+              booking_status: BookingStatus.completed,
+              settlement_status: "scheduled",
+            },
           });
 
           await notifyReviewRequested(tx, {
@@ -1399,7 +1475,7 @@ router.patch(
 
       return successResponse(
         res,
-        updated,
+        withTransactionDisplayStatus({ ...updated, contract: booking.contract }),
         "행사 완료가 확인되었습니다. 후기를 작성해 주세요.",
       );
     } catch (err) {
@@ -1420,6 +1496,7 @@ router.patch(
         include: {
           request: true,
           freelancer: { select: { user_id: true } },
+          contract: { select: { status: true } },
         },
       });
 
@@ -1433,11 +1510,14 @@ router.patch(
         );
       }
 
-      if (!canTransitionBooking(booking.booking_status, "completed")) {
+      if (
+        !canTransitionBooking(booking.booking_status, "completed") ||
+        !canRequestOrApproveCompletion(booking)
+      ) {
         return errorResponse(
           res,
           "VALIDATION_ERROR",
-          "현재 상태에서는 행사 완료 처리할 수 없습니다.",
+          "양측 전자서명과 결제 완료 후 에스크로 보관 중인 예약만 행사 완료 처리할 수 있습니다.",
           [],
           400,
         );
@@ -1447,7 +1527,10 @@ router.patch(
         async (tx: Prisma.TransactionClient) => {
           const completed = await tx.booking.update({
             where: { id: req.params.id },
-            data: { booking_status: BookingStatus.completed },
+            data: {
+              booking_status: BookingStatus.completed,
+              settlement_status: "scheduled",
+            },
           });
 
           if (
@@ -1471,7 +1554,11 @@ router.patch(
         },
       );
 
-      return successResponse(res, updated, "행사 완료 처리되었습니다.");
+      return successResponse(
+        res,
+        withTransactionDisplayStatus({ ...updated, contract: booking.contract }),
+        "행사 완료 처리되었습니다.",
+      );
     } catch (err) {
       next(err);
     }

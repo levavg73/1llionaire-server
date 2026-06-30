@@ -36,14 +36,21 @@ export const requestTransitions: Record<RequestStatus, RequestStatus[]> = {
 };
 
 export const bookingTransitions: Record<BookingStatus, BookingStatus[]> = {
-  pending: ["negotiating", "accepted", "rejected", "payment_pending", "canceled", "disputed"],
-  negotiating: ["accepted", "rejected", "payment_pending", "canceled", "disputed"],
-  accepted: ["payment_pending", "confirmed", "canceled", "disputed"],
-  rejected: [],
+  // 계약 전: 요청 → 수락 → 가격 협상 → 금액 확정/계약서 생성
+  pending: ["accepted", "rejected", "canceled", "disputed"],
+  accepted: ["negotiating", "canceled", "disputed"],
+  negotiating: ["payment_pending", "canceled", "disputed"],
+
+  // 계약서 양측 서명 + 결제 완료 이후에만 confirmed 로 진입합니다.
   payment_pending: ["confirmed", "canceled", "disputed"],
-  confirmed: ["completion_requested", "completed", "canceled", "disputed"],
-  completion_requested: ["completed", "canceled", "disputed"],
+
+  // 계약/결제 이후에는 일반 취소가 아니라 결제 환불 플로우를 사용합니다.
+  confirmed: ["completion_requested", "completed", "disputed"],
+  completion_requested: ["completed", "disputed"],
+
+  // 정산까지 끝난 거래는 닫힌 상태입니다.
   completed: [],
+  rejected: [],
   canceled: [],
   disputed: ["canceled"],
 };
