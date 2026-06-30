@@ -1010,7 +1010,15 @@ router.get(
 
       const where: Prisma.RecommendationWhereInput = {
         freelancer_id: profile.id,
-        status: { in: ["consultation_requested", "selected"] },
+        status: "consultation_requested",
+        request: {
+          bookings: {
+            some: {
+              freelancer_id: profile.id,
+              booking_status: "pending",
+            },
+          },
+        },
       };
 
       const [items, total] = await Promise.all([
@@ -1035,7 +1043,10 @@ router.get(
                 description: true,
                 status: true,
                 bookings: {
-                  where: { freelancer_id: profile.id },
+                  where: {
+                    freelancer_id: profile.id,
+                    booking_status: "pending",
+                  },
                   orderBy: { created_at: "desc" },
                   take: 1,
                   select: {

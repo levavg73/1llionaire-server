@@ -393,11 +393,9 @@ router.post(
             },
           });
 
-          await tx.eventRequest.update({
-            where: { id: request.id },
-            data: { status: "consulting" },
-          });
-
+          // 고객이 진행자를 선택한 직후에는 아직 프리랜서가 수락하지 않았으므로
+          // 요청서 전체 상태를 상담 진행 중으로 바꾸지 않습니다.
+          // 실제 상담 전환은 프리랜서가 /accept 를 호출해 채팅방이 생성되는 시점에만 발생합니다.
           await tx.recommendation.update({
             where: { id: recommendation.id },
             data: { status: "consultation_requested" },
