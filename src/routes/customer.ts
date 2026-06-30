@@ -13,6 +13,7 @@ import {
 } from "../utils/response";
 import { generateAiRecommendationsForRequest, isGenericRecommendationReason } from "../services/aiMatching";
 import { attachSignedProfileImageUrl } from "../utils/profileImages";
+import { createNotification } from "../utils/notifications";
 import {
   eventDateString,
   optionalHttpsUrl,
@@ -26,6 +27,16 @@ const router = Router();
 
 const REQUEST_UPDATE_ALLOWED_STATUSES = ["submitted", "reviewing", "recommending", "recommended"];
 const REQUEST_DELETE_ALLOWED_STATUSES = ["submitted", "reviewing", "recommending", "recommended", "consulting"];
+const BOOKING_PLATFORM_FEE_RATE = 0.1;
+
+function calculateBookingAmounts(finalPrice: number) {
+  const platformFee = Math.floor(finalPrice * BOOKING_PLATFORM_FEE_RATE);
+  return {
+    finalPrice,
+    platformFee,
+    freelancerAmount: finalPrice - platformFee,
+  };
+}
 
 function toMatchingRequest(request: {
   id: string;
@@ -228,7 +239,7 @@ router.post(
       const preferredFreelancers = uniquePreferredFreelancerIds.length > 0
         ? await prisma.freelancerProfile.findMany({
             where: { id: { in: uniquePreferredFreelancerIds }, status: "approved" },
-            select: { id: true, display_name: true },
+            select: { id: true, user_id: true, display_name: true, base_price_min: true, base_price_max: true },
           })
         : [];
 
@@ -242,49 +253,96 @@ router.post(
         );
       }
 
+      const directRequestPrimaryFreelancer = preferredFreelancers[0];
+      const directRequestFallbackPrice = directRequestPrimaryFreelancer
+        ? requestBody.budget_max ??
+          requestBody.budget_min ??
+          directRequestPrimaryFreelancer.base_price_min ??
+          directRequestPrimaryFreelancer.base_price_max
+        : null;
+
+      if (directRequestPrimaryFreelancer && !directRequestFallbackPrice) {
+        return errorResponse(
+          res,
+          "VALIDATION_ERROR",
+          "지명 요청 전달을 위해 예산 또는 진행자 기준 금액이 필요합니다.",
+          [],
+          400
+        );
+      }
+
       const createdRequest = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const isDirectFreelancerRequest = preferredFreelancers.length > 0;
         const request = await tx.eventRequest.create({
           data: {
             ...requestBody,
             event_date: eventDate,
             attachment_url: requestBody.attachment_url || null,
             customer_id: req.user!.userId,
-            status: "submitted",
+            status: isDirectFreelancerRequest ? "recommended" : "submitted",
           },
           select: requestResponseSelect,
         });
 
-        if (preferredFreelancers.length > 0) {
-          await tx.recommendation.createMany({
-            data: preferredFreelancers.map((freelancer, index) => ({
+        if (isDirectFreelancerRequest) {
+          const primaryFreelancer = directRequestPrimaryFreelancer!;
+          const amounts = calculateBookingAmounts(directRequestFallbackPrice!);
+
+          await tx.recommendation.create({
+            data: {
               request_id: request.id,
-              freelancer_id: freelancer.id,
+              freelancer_id: primaryFreelancer.id,
               recommended_by: req.user!.userId,
-              recommendation_reason: `${freelancer.display_name ?? "해당 진행자"}님은 고객이 직접 지명한 우선 후보입니다.`,
-              display_order: index + 1,
-              status: "sent",
-            })),
-            skipDuplicates: true,
+              recommendation_reason: `${primaryFreelancer.display_name ?? "해당 진행자"}님은 고객이 직접 지명한 우선 후보입니다.`,
+              display_order: 1,
+              status: "consultation_requested",
+            },
+          });
+
+          const booking = await tx.booking.create({
+            data: {
+              request_id: request.id,
+              customer_id: req.user!.userId,
+              freelancer_id: primaryFreelancer.id,
+              event_title: request.event_title,
+              event_date: request.event_date,
+              start_time: request.start_time,
+              end_time: request.end_time,
+              venue: request.venue,
+              final_price: amounts.finalPrice,
+              platform_fee: amounts.platformFee,
+              freelancer_amount: amounts.freelancerAmount,
+              booking_status: "pending",
+              payment_status: "unpaid",
+              settlement_status: "pending",
+            },
+            select: { id: true },
+          });
+
+          await createNotification(tx, {
+            user_id: primaryFreelancer.user_id,
+            type: "booking_requested",
+            title: "새 지명 요청",
+            message: `${request.event_title} 요청서가 도착했습니다. 요청서를 확인한 뒤 수락 또는 거절해 주세요.`,
+            link_url: "/freelancer/requests",
+          });
+
+          console.info("[direct-request-delivered]", {
+            request_id: request.id,
+            booking_id: booking.id,
+            freelancer_id: primaryFreelancer.id,
           });
         }
 
         return request;
       });
 
-      const matching = await runAiRecommendationsSafely({
-        request: createdRequest,
-        recommendedByUserId: req.user!.userId,
-        excludedFreelancerIds: preferredFreelancers.map((freelancer) => freelancer.id),
-        startingDisplayOrder: preferredFreelancers.length + 1,
-      });
-
-      if (preferredFreelancers.length > 0 && matching.count === 0) {
-        await prisma.eventRequest.update({
-          where: { id: createdRequest.id },
-          data: { status: "recommended" },
-          select: { id: true },
-        });
-      }
+      const matching = preferredFreelancers.length > 0
+        ? { count: 0, status: "recommended", failed: false }
+        : await runAiRecommendationsSafely({
+            request: createdRequest,
+            recommendedByUserId: req.user!.userId,
+          });
 
       const finalRequest = await prisma.eventRequest.findUniqueOrThrow({
         where: { id: createdRequest.id },
@@ -294,11 +352,13 @@ router.post(
       const totalRecommendationCount = matching.count + preferredFreelancers.length;
       const responseRequest = (await attachRequestViewCounts([finalRequest]))[0];
 
-      const message = totalRecommendationCount > 0
-        ? `요청서가 등록되었습니다. AI가 요청서와 진행자 정보를 분석해 후보 ${totalRecommendationCount}명을 추천했습니다.`
-        : matching.failed
-          ? "요청서가 등록되었습니다. AI 후보 추천은 잠시 후 다시 생성해 주세요."
-          : "요청서가 등록되었습니다. 조건에 맞는 후보를 찾는 중입니다.";
+      const message = preferredFreelancers.length > 0
+        ? "요청서가 등록되었고 지명한 진행자에게 바로 전달되었습니다."
+        : totalRecommendationCount > 0
+          ? `요청서가 등록되었습니다. AI가 요청서와 진행자 정보를 분석해 후보 ${totalRecommendationCount}명을 추천했습니다.`
+          : matching.failed
+            ? "요청서가 등록되었습니다. AI 후보 추천은 잠시 후 다시 생성해 주세요."
+            : "요청서가 등록되었습니다. 조건에 맞는 후보를 찾는 중입니다.";
 
       return successResponse(res, responseRequest, message, 201);
     } catch (err) {

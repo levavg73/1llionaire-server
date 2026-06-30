@@ -7,6 +7,25 @@ const TOP_RECOMMENDATION_COUNT = 5;
 const AI_RECOMMENDATION_POOL_SIZE = 12;
 const MAX_AI_IMAGE_COUNT = 12;
 const MAX_AI_IMAGE_BYTES = 1_500_000;
+const DEFAULT_GEMINI_MATCHING_TIMEOUT_MS = 25_000;
+const MIN_GEMINI_MATCHING_TIMEOUT_MS = 1_000;
+const MAX_GEMINI_MATCHING_TIMEOUT_MS = 60_000;
+
+function getGeminiMatchingTimeoutMs(): number {
+  const rawValue = process.env.GEMINI_MATCHING_TIMEOUT_MS;
+  const parsedValue = rawValue
+    ? Number.parseInt(rawValue, 10)
+    : DEFAULT_GEMINI_MATCHING_TIMEOUT_MS;
+
+  if (!Number.isFinite(parsedValue)) {
+    return DEFAULT_GEMINI_MATCHING_TIMEOUT_MS;
+  }
+
+  return Math.min(
+    Math.max(parsedValue, MIN_GEMINI_MATCHING_TIMEOUT_MS),
+    MAX_GEMINI_MATCHING_TIMEOUT_MS,
+  );
+}
 
 const EVENT_TYPE_SYNONYMS: Record<string, string[]> = {
   기업행사: [
@@ -754,7 +773,9 @@ async function callGeminiWithParts(
         "x-goog-api-key": apiKey,
         "Content-Type": "application/json",
       },
-      timeout: 30_000,
+      // 추천 품질/성공률을 우선해 Gemini 응답을 최대 25초까지 기다립니다.
+      // 운영 중 더 조정이 필요하면 GEMINI_MATCHING_TIMEOUT_MS 환경변수로 변경하세요.
+      timeout: getGeminiMatchingTimeoutMs(),
     },
   );
 
@@ -1139,7 +1160,7 @@ async function buildAiRecommendationDrafts(
   let aiRecommendations: AiRecommendationItem[] = [];
   let lastError: unknown = null;
 
-  for (const includeImages of [true, false]) {
+  for (const includeImages of [false]) {
     try {
       aiRecommendations = await generateAiRecommendationItems(
         request,
@@ -1152,7 +1173,7 @@ async function buildAiRecommendationDrafts(
       lastError = err;
       logGeminiError(
         includeImages
-          ? "[ai-recommendation-with-images-failed] retrying text-only"
+          ? "[ai-recommendation-with-images-failed] using local rich reasons"
           : "[ai-recommendation-text-only-failed] using local rich reasons",
         err,
         { request_id: request.id, include_images: includeImages },
